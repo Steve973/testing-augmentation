@@ -3,393 +3,1284 @@
 ## Overview
 
 This document defines the rules and workflow for writing unit tests. It is a
-contract. If a test violates this contract, then it is not a unit test.
+contract: **if a test violates this contract, it is not a unit test**.
 
 This contract is designed to be used with a Unit Ledger as described in the
-[Unit Ledger Specification](./unit-ledger-spec.md) document. The ledger is the
-authoritative inventory of callables and branches. The contract is the
-authoritative set of constraints for deriving unit tests from that ledger.
+[Unit Ledger Generation Procedure](./unit-ledger-spec.md). The ledger is the
+authoritative inventory of callables and execution items (EIs). This contract
+is the authoritative set of constraints for deriving unit tests from that
+ledger.
 
-## Goal
+**Prerequisites:** You must read and understand the Unit Ledger specification
+before using this contract. This document assumes you have a completed Unit
+Ledger for the unit under test.
 
-Achieve 100% (complete) branch coverage for the unit under test.
-
-Branch coverage means, wherever possible, applicable, or relevant:
-- Every conditional branch/path is exercised at least once (e.g., if/else, etc.)
-- Every basic/unconditional/sequential statement is exercised at least once
-- Every exception path is exercised
-- Every early exit is exercised (e.g., return, raise, yield, break, generator
-  termination)
-- Loop behavior covers both zero and non-zero iteration count
-
-Coverage target applies only to the unit under test. Coverage gained by
-exercising external code does not count, and it should be avoided in favor of
-other strategies, including mocking, stubbing, or the use of test-specific
-implementations (fakes).
+**Language Note:** Examples in this document are primarily in Python (using
+pytest). However, the principles, rules, and workflow are **language-agnostic**
+and apply to any programming language. Adapt the syntax and testing framework
+to your language (JUnit for Java, xUnit for C#, RSpec for Ruby, etc.), but
+follow the same procedure and constraints.
 
 ---
 
-## Hard rules (non-negotiable)
+## 1. Definitions
 
-### These are unit tests
+### 1.1 Unit Test
 
-- Unit under test equals code defined in the target unit only.
-  - Do not call upstream orchestrators.
-  - Do not call adjacent units because it is convenient.
-  - Mock or stub everything outside the target unit.
+A **unit test** exercises code within a single compilation unit (module, file,
+class) in isolation from:
+- Other units in the same project
+- External systems (network, filesystem, database, etc.)
+- Non-deterministic influences (time, randomness, environment)
 
-- Mock or stub all external influences, including but not limited to:
-  - network and HTTP and external package/dependency/resource registries
-  - filesystem and archive IO
-  - environment variables
-  - dynamic discovery mechanisms (e.g., plugins, services, entrypoints)
-  - time and randomness and UUIDs
-  - subprocesses, threads, async scheduling
-  - third party libraries where behavior is not the unit under test
+A unit test:
+- **Focuses on one unit** – the code defined in the target file/module only
+- **Mocks all dependencies** – everything outside the unit boundary
+- **Runs fast** – no I/O, no network, no subprocess calls
+- **Is deterministic** – same inputs always produce the same results
+- **Is isolated** – tests can run in any order, in parallel
 
-If you are about to introduce an unmocked external influence, stop and
-refactor the test to mock it.
+### 1.2 Coverage Goal
 
-No real HTTP. No real external package/dependency/resource registries.
+**Goal:** Achieve 100% execution item (EI) coverage for the unit under test.
 
-### Test structure rules
+**EI coverage** means every execution item enumerated in the Unit Ledger is
+exercised at least once. This includes:
+- Every conditional branch/path (if/else, switch/case, ternary)
+- Every loop outcome (zero iterations, 1+ iterations)
+- Every exception path (success, each exception handler)
+- Every early exit (return, raise, yield, break)
+- Every sequential statement
 
-- Do not nest classes for test cases, by default.
-  - For python, use plain `def test_...():` functions only.
-  - For languages like Java, prefer single-level test classes over nested
-    test classes.
-  - Projects may explicitly override this rule, but the override must be
-    provided in writing as supplemental instructions.
-- Parameterize. Prefer the test framework's parameterization mechanism over
-  copy/paste test blocks or functions.
-- Do not manually test multiple cases in a loop inside a single test function.
-  Rely on the framework's parameterization mechanism.
+**Scope:** Coverage applies only to the unit under test. Coverage gained by
+exercising external code does not count and should be avoided through mocking.
 
-### Selection behavior rule (ordering, candidates, preference)
+### 1.3 Branch Coverage vs EI Coverage
 
-If the code selects the best item or ranked selection:
-- Never rely on lexical sorting as a proxy for preference.
-- Selection must follow the explicit preference order provided by the
-  code under test.
-- If tests need ordering, assert based on the code’s ordering rules, not
-  incidental/arbitrary ordering.
+**Industry term:** "Branch coverage" traditionally means exercising all
+conditional branches.
 
-### Unreachable branches
+**This contract:** Uses "EI coverage" to be precise about what we are
+enumerating. An EI (Execution Item) is an atomic unit of execution – a distinct
+outcome path for a single line of code.
 
-If you cannot hit a branch without violating unit boundaries or
-requiring impossible state:
-- Mark it UNREACHABLE and explain why.
-- Do not write fake tests.
+For communication with traditional tools, "branch coverage" and "EI coverage"
+are equivalent in this context. The Unit Ledger enumerates EIs, tests exercise
+them, and coverage tools report them as branches.
 
-Note that, for a branch to be truly unreachable, it would have to be guarded by
-a logic gate that allowed no conditions to pass through to the branch. A method
-that is abstract, or one that has its signature declared in an interface, for
-example, does not meet this criteria. Therefore, is not unreachable. To verify
-abstract classes or interfaces, the test would simply introduce a test
-implementation. 
+### 1.4 Key Terms
 
----
+**Unit Ledger:** Three-document YAML file containing:
+- Document 1: Derived IDs (all EI IDs in the unit)
+- Document 2: Ledger (detailed callable and EI specifications)
+- Document 3: Review (findings from ledger generation)
 
-## Mandatory workflow
+**EI ID:** Unique identifier for an execution item (e.g., `C000F001E0003`).
+Every reachable EI in the ledger must be covered by at least one test.
 
-### Ledger first
+**Case Row:** The smallest unit of test intent. Specifies:
+- Input values
+- Expected outcome (return value or exception)
+- `covers`: list of EI IDs exercised by this case
 
-You must generate a Unit Ledger before writing any tests. Ensure that you are
-following the unit ledger specification.
+**Bucket:** A group of case rows that share the same harness key. Each bucket
+becomes one test function.
 
-If you start writing tests before the ledger exists, stop and redo.
+**Harness Key:** A tuple of facts used to partition case rows into buckets:
+- Callable ID
+- Outcome kind (returns vs raises)
+- Patch targets (sorted list of mocks needed)
 
-The ledger is the authoritative inventory of:
-- callables in the unit
-- branches for each callable (by Branch ID)
-- constraints needed for unit level isolation (mocks, fakes, boundaries)
+**Integration Fact:** Information from the ledger about inter-unit calls and
+boundary crossings. Used to determine what to mock and how to reach integration
+points.
 
-### Only after the ledger: test structure, case matrix, then tests
+**Execution Path:** A sequence of EI IDs that must execute to reach a particular
+point in the code. Used to trace how to trigger specific EIs or integrations.
 
-After the Unit Ledger exists, create unit tests using a top down, artifact
-driven procedure that produces runnable output early and avoids stalling.
+**Blocked EI:** An EI that cannot be tested without information not present in
+the unit or ledger. Blocked EIs do not prevent progress on other EIs.
 
-#### File shaping procedure (deterministic)
-
-After the Unit Ledger exists, determine the constituent test case functions
-using a deterministic file shaping procedure. This procedure must be mechanical
-and must not involve searching for an optimal layout.
-
-This procedure produces a runnable test skeleton early. Later steps may refine
-assertions and reduce duplication, but they must not change the ledger-derived
-branch-to-case mapping.
-
-##### Step 1: Create a case row for each branch
-
-For each callable in ledger order, create one case row per reachable Branch ID
-in Branch ID order. Every reachable Branch ID must appear at least once across
-all case rows, minus UNREACHABLE and BLOCKED.
-
-A case row is the smallest unit of test intent. Each case row must include:
-- inputs
-- expected outcome (return value shape or exception substring)
-- covers = ["<branch_id_1>", "<branch_id_2>", ...]
-
-If a branch cannot be mapped to concrete inputs and expectations without
-guessing, still create a case row and mark it blocked. Blocked branches must not
-prevent shaping or test generation for unblocked branches.
-
-##### Step 2: Partition case rows into buckets using a small harness key
-
-Partition case rows into buckets using a small harness key. The harness key must
-be derived from ledger facts and must be intentionally small to avoid
-combinatorial churn.
-
-The default harness key is:
-- callable ID
-- outcome kind: returns vs. raises
-- patch targets: a sorted list of patch targets referenced by the ledger test
-  guidance for that callable (empty if none)
-- If patch targets are not specified for a callable, treat patch targets as an
-  empty list and proceed.
-
-Do not backtrack. Once a case row is assigned to a bucket, it must not be moved
-during this procedure.
-
-##### Step 3: Convert buckets into test functions
-
-Each bucket becomes one test function.
-
-- If a bucket contains two or more case rows, the bucket may be realized as a
-  parameterized test function.
-- If a bucket contains exactly one case row, the bucket must be realized as a
-  non-parameterized test function.
-
-Each realized test function must reference covers for every case row it
-executes, either via case data or via a covers comment.
-
-Immediately after this step, emit a runnable test skeleton for the unit.
-
-##### Step 4: Optional micro review (bounded)
-
-If and only if no case rows are blocked, perform a bounded micro review pass.
-This pass is allowed to improve clarity without introducing churn.
-
-Allowed operations:
-- merge buckets only when their harness keys are identical
-- split a bucket only to isolate a blocked or uncertain case row
-- rename test functions for consistency and readability
-
-Forbidden operations:
-- searching for an optimal grouping
-- revisiting branch to case mapping decisions
-- inventing new branches or new case rows
-- deep semantic analysis of the unit
-
-The micro review is a single pass over the bucket list. After one pass, stop
-and proceed to test implementation.
-
-##### Step 5: Coverage: first-pass implementation
-
-Implement the realized test functions produced by this file shaping procedure.
-
-Constraints:
-- Follow the mocking and isolation rules in the Test writing rules section. Do
-  not allow external influences to leak into the tests.
-- Implement tests, bucket by bucket, in ledger order. Do not skip to later
-  callables.
-- Cover all reachable Branch IDs. Use the case rows as the source of truth for
-  which Branch IDs are covered by which test cases.
-- Prefer minimal, non-brittle assertions sufficient to prove the branch outcome.
-  Strengthen assertions later during refinement.
-- Do not invent expectations. If a branch outcome cannot be asserted without
-  guessing, defer assertion strengthening and keep the test at minimal proof.
-
-Deliverable:
-- A runnable test unit where all realized test functions execute and
-  cover all reachable Branch IDs. If tests are being written by generative AI,
-  and if the AI assistant is unable to run the tests, then this may require
-  manual intervention by the user. The user should run the tests, then provide
-  feedback so that the AI assistant can make corrections, and ultimately,
-  provide a runnable test unit.
-
-##### Step 6: Refinement pass (bounded)
-
-After the coverage-first pass is complete, perform a bounded refinement pass.
-This is a single-pass refinement bounded in one sweep, and it does not include
-structural rewrites.
-
-Constraints:
-- Do not change the branch to case mapping established in Step 1.
-- Do not change which Branch IDs are covered by which case rows.
-- Improvements are limited to:
-  - stronger assertions based on explicit unit contract
-  - reduced duplication through parameterization or helpers
-  - clearer naming and readability
-  - improved mock clarity and call site correctness
-
-Stop refinement when improvements lack determinism and would require guessing 
-or would increase coupling to implementation details.
-
-##### Step 7: Stop condition
-
-Stop expanding when:
-- all reachable Branch IDs are covered, and
-- unit isolation constraints are satisfied, and
-- assertions provide sufficient proof without brittleness or invention
-
-Proceed to the Test writing rules section for detailed constraints on mocking,
-assertions, and labeling.
+**Unreachable EI:** An EI that cannot be executed without violating unit
+boundaries or creating an impossible state. Marked UNREACHABLE in the ledger.
 
 ---
 
-## Blocked branch protocol
+## 2. Hard Rules (Non-Negotiable)
 
-A blocked branch must not prevent progress. If any Branch IDs cannot be tested
-without guessing, the assistant must continue and complete all unblocked
-branches, then report blocked branches explicitly.
+### 2.1 Unit Boundaries
 
-### Definition of blocked
+**What counts as "the unit":**
+- Code defined in the target file/module only
+- Classes, functions, methods in that file
+- Nothing outside that file
 
-A Branch ID is blocked if reaching it, or asserting its outcome, requires
-missing information that cannot be derived from the unit and the ledger without
+**Forbidden:**
+- Calling upstream orchestrators
+- Calling adjacent units "because it's convenient"
+- Letting external code execute unmocked
+
+**Required:**
+- Mock or stub everything outside the target unit
+- Use integration facts from the ledger to identify what needs mocking
+
+### 2.2 External Influences Must Be Mocked
+
+Mock or stub all external influences, including but not limited to:
+
+**Boundary Crossings (see ledger integration facts):**
+- **Network:** HTTP, sockets, APIs (boundary.kind = network)
+- **Filesystem:** File I/O, directory operations (boundary.kind = filesystem)
+- **Database:** Queries, transactions (boundary.kind = database)
+- **Subprocess:** Shell commands, external programs
+  (boundary.kind = subprocess)
+- **Message Bus:** Queue publish/consume (boundary.kind = message_bus)
+- **Clock:** Current time, timestamps (boundary.kind = clock)
+- **Randomness:** Random numbers, UUIDs (boundary.kind = randomness)
+- **Environment:** Environment variables (boundary.kind = env)
+
+**Interunit Calls (see ledger integration facts):**
+- Calls to other project modules
+- Calls to other classes in different files
+- Dynamic discovery mechanisms (plugins, services, entrypoints)
+
+**Third-Party Libraries:**
+- External package registries
+- HTTP clients (requests, httpx, etc.)
+- Database drivers
+- Async scheduling
+- Thread pools
+
+**If you are about to introduce an unmocked external influence, stop and
+refactor the test to mock it.**
+
+### 2.3 Test Structure Rules
+
+**Function/Method Structure:**
+- Do not nest test classes, by default
+- Python: Use plain `def test_...():` functions only
+- Java/Kotlin: Prefer single-level test classes over nested classes
+- Projects may override this rule with explicit written instructions
+
+**Parameterization:**
+- Prefer the test framework's parameterization mechanism
+- Do not copy/paste test blocks or functions for multiple cases
+- Do not manually loop over test cases inside a single test function
+
+**Language-Specific Adaptations:**
+- Python: `@pytest.mark.parametrize` or `@parameterized.expand`
+- Java: `@ParameterizedTest` with `@MethodSource` or `@ValueSource`
+- C#: `[Theory]` with `[InlineData]` or `[MemberData]`
+- Ruby: RSpec's `where` or `it` blocks with iteration
+- Adapt to your language's idiomatic test patterns while following the spirit
+  of these rules
+
+**Example (Python with pytest):**
+```python
+# ✓ Good: Framework parameterization
+@pytest.mark.parametrize("input,expected", [
+    (5, "positive"),
+    (-3, "negative"),
+    (0, "zero"),
+])
+def test_classify_value(input, expected):
+    # covers: C000F001E0001, C000F001E0002, C000F001E0003
+    assert classify_value(input) == expected
+
+# ✗ Bad: Manual loop
+def test_classify_value():
+    for input, expected in [(5, "positive"), (-3, "negative"), (0, "zero")]:
+        assert classify_value(input) == expected
+```
+
+### 2.4 Selection Behavior Rule
+
+If code selects the best item or uses ranked selection:
+
+**Forbidden:**
+- Relying on lexical sorting as a proxy for preference
+- Asserting on incidental/arbitrary ordering
+
+**Required:**
+- Selection must follow the explicit preference order in the code under test
+- Assert based on the code's ordering rules
+- Use the actual comparison/ranking logic
+
+### 2.5 Unreachable EIs
+
+If you cannot reach an EI without violating unit boundaries or requiring
+impossible state:
+- The ledger should mark it UNREACHABLE
+- Do not write fake tests just to hit the coverage number
+- Document why it's unreachable
+
+**Note:** Abstract methods and interface signatures are NOT unreachable. Test
+them by introducing a test implementation that exercises the abstract contract.
+
+---
+
+## 3. Mandatory Workflow
+
+### 3.1 Prerequisites
+
+**Before writing any tests:**
+
+1. **Generate the Unit Ledger** following the Unit Ledger Generation Procedure
+2. **Validate the ledger** against the schema
+3. **Review Document 3** for any generation findings
+
+**If you start writing tests before the ledger exists, stop and generate the
+ledger first.**
+
+The ledger is the authoritative source for:
+- All callables in the unit (Document 2: unit.children)
+- All EI IDs and their outcomes (Document 2: callable.branches)
+- Integration points requiring mocks (Document 2: callable.integration)
+- Execution paths to each integration (integration.executionPaths)
+
+### 3.2 The Test Generation Procedure
+
+After the Unit Ledger exists, generate unit tests using this deterministic
+7-stage procedure. This procedure is mechanical and must not involve searching
+for an optimal layout.
+
+The procedure produces a runnable test skeleton early. Later stages refine
+assertions and reduce duplication, but must not change the ledger-derived
+EI-to-case mapping.
+
+---
+
+#### Stage 1: Create Case Rows
+
+**Purpose:** Map every reachable EI to at least one test case.
+
+**Process:**
+
+For each callable in the ledger (in ledger order):
+1. For each reachable EI ID (in EI ID order):
+   - Create one case row
+   - Determine inputs that will trigger this EI
+   - Determine expected outcome (return value or exception)
+   - Record which EI IDs this case covers
+
+**Case Row Structure:**
+```yaml
+{
+    "callable_id": "C000F001",
+    "ei_ids": ["C000F001E0003", "C000F001E0005"],  # EIs covered
+    "inputs": {"x": -5},
+    "outcome_kind": "returns",  # or "raises"
+    "expected": "negative",
+    "patch_targets": [],  # mocks needed (from integration facts)
+}
+```
+
+**Rules:**
+- Every reachable EI ID must appear in at least one case row
+- Skip UNREACHABLE EIs (marked in ledger)
+- If an EI cannot be mapped to inputs with certainty, mark it BLOCKED
+  (see Section 4)
+- Use integration facts from the ledger to determine patch_targets
+- Use executionPaths to trace how to reach specific EIs
+
+**Using Execution Paths:**
+
+Integration facts in the ledger contain `executionPaths` – sequences of EI IDs
+that lead to that integration point. Use these to:
+- Trace what conditions must be true to reach an integration
+- Determine which EIs must execute before the integration
+- Set up mocks at the right point in the execution flow
+
+Example:
+```yaml
+# From ledger
+integration:
+  boundaries:
+    - id: IC000F002E0007
+      target: requests.get
+      executionPaths:
+        # must hit E0001, E0003 first
+        - [C000F002E0001, C000F002E0003, C000F002E0007]
+```
+
+This tells you: to reach the `requests.get` call (E0007), your test inputs must:
+- Trigger E0001 (e.g., pass validation check)
+- Trigger E0003 (e.g., take the "fetch remote" branch)
+- Then you'll hit E0007 (the actual HTTP call to mock)
+
+**Output:** Complete list of case rows for the entire unit.
+
+**Verification Gate:**
+- [ ] Every reachable EI ID appears in at least one case row
+- [ ] Every case row has inputs, expected outcome, and covers the list
+- [ ] Blocked EIs are marked (don't prevent progress)
+
+---
+
+#### Stage 2: Partition Into Buckets
+
+**Purpose:** Group case rows that can share test setup/teardown.
+
+**Process:**
+
+For each case row, compute its harness key:
+```python
+harness_key = (
+    callable_id,
+    outcome_kind,  # "returns" or "raises"
+    tuple(sorted(patch_targets))  # sorted list of mocks
+)
+```
+
+Group case rows by identical harness keys. Each group is a bucket.
+
+**Why This Key:**
+- **callable_id:** Tests for different functions should be separate
+- **outcome_kind:** Mixing returns and raises in one test is awkward
+- **patch_targets:** Sharing mock setup is efficient; different mocks mean
+  different buckets
+
+**Rules:**
+- Do not backtrack – once assigned, a case row stays in its bucket
+- Keep the key small to avoid combinatorial explosion
+- If the ledger provides different patch targets via integration facts, then
+  respect them
+
+**Example:**
+
+Case rows:
+```yaml
+[
+    {"callable": "C000F001", "outcome": "returns", "patches": [], "covers": ["E0001"]},
+    {"callable": "C000F001", "outcome": "returns", "patches": [], "covers": ["E0002"]},
+    {"callable": "C000F001", "outcome": "raises", "patches": [], "covers": ["E0003"]},
+    {"callable": "C000F002", "outcome": "returns", "patches": ["requests.get"], "covers": ["E0005"]},
+]
+```
+
+Buckets:
+```
+{
+    ("C000F001", "returns", ()): [case1, case2],  # 2 cases, can parameterize
+    ("C000F001", "raises", ()): [case3],          # 1 case, single test
+    ("C000F002", "returns", ("requests.get",)): [case4],  # 1 case, needs mock
+}
+```
+
+**Output:** Buckets of case rows, keyed by harness key.
+
+**Verification Gate:**
+- [ ] Every case row is in exactly one bucket
+- [ ] Bucket keys are computed correctly
+- [ ] No case rows lost or duplicated
+
+---
+
+#### Stage 3: Realize Test Functions
+
+**Purpose:** Convert buckets into actual test functions.
+
+**Process:**
+
+For each bucket:
+- **If a bucket has multiple case rows:** Create parameterized test function
+- **If a bucket has one case row:** Create non-parameterized test function
+
+**Naming Convention:**
+- `test_<callable_name>_<outcome>_<distinguisher>`
+- Example: `test_classify_value_returns`, `test_classify_value_raises`
+- If multiple buckets for the same callable/outcome, add a distinguisher
+
+**Coverage Annotation:**
+
+Every test function must reference the EI IDs it covers:
+```python
+def test_classify_value_returns(input, expected):
+    # covers: C000F001E0001, C000F001E0002, C000F001E0005
+    assert classify_value(input) == expected
+```
+
+**Example Realization:**
+
+Bucket: `("C000F001", "returns", ())` with 2 case rows
+
+Becomes:
+```python
+@pytest.mark.parametrize("input,expected,covers", [
+    (5, "positive", ["C000F001E0001", "C000F001E0003"]),
+    (-3, "negative", ["C000F001E0002", "C000F001E0004"]),
+])
+def test_classify_value_returns(input, expected, covers):
+    # covers: see parameter
+    assert classify_value(input) == expected
+```
+
+**Output:** Test skeleton – all test functions defined, runnable (even if
+assertions are minimal).
+
+**Verification Gate:**
+- [ ] Every bucket has exactly one test function
+- [ ] Parameterized tests use a framework mechanism
+- [ ] Every test has a coverage annotation
+- [ ] Test skeleton is syntactically valid and runnable
+
+---
+
+#### Stage 4: Micro Review (Optional, Bounded)
+
+**Purpose:** Improve clarity without introducing churn.
+
+**When:** Only if no case rows are BLOCKED.
+
+**Allowed Operations:**
+- Merge buckets when harness keys are identical
+- Split a bucket to isolate a blocked or uncertain case
+- Rename test functions for readability and consistency
+- Adjust parameterization for clarity
+
+**Forbidden Operations:**
+- Searching for an optimal grouping
+- Revisiting EI-to-case mapping
+- Inventing new EIs or case rows
+- Deep semantic analysis
+- Major refactoring
+
+**Process:** Single pass over the bucket list. After one pass, stop.
+
+**Output:** Refined test skeleton (optional, skip if all unblocked).
+
+**Verification Gate:**
+- [ ] No EI IDs were added or removed
+- [ ] Every EI ID is still covered by the same test(s)
+- [ ] Changes improve clarity only
+
+---
+
+#### Stage 5: Implementation (Coverage First)
+
+**Purpose:** Implement the test functions to achieve full EI coverage.
+
+**Process:**
+
+Implement test functions bucket by bucket, in ledger order:
+
+1. **Set up mocks** (from patch_targets in case rows)
+   - Use integration facts to identify mock targets
+   - Mock at the call site used by the unit under test
+   - Use project-provided fakes/fixtures when available
+
+2. **Call the function under test** with the case row inputs
+
+3. **Assert the outcome**
+   - For return cases: assert return value matches expected
+   - For exception cases: assert exception type and key message substrings
+
+4. **Verify coverage**
+   - Run tests with a coverage tool capable of tracking lines *and* branches
+   - Confirm all EI IDs in case row's `covers` list are hit
+
+**Constraints:**
+- Follow mocking rules (Section 2.2 and 5.1)
+- Do not skip to later callables – work in ledger order
+- Prefer minimal assertions sufficient to prove the EI outcome
+- Do not invent expectations – if uncertain, use minimal proof
+
+**Example Implementation:**
+
+```python
+from unittest.mock import patch, Mock
+
+def test_fetch_user_data_returns(mock_requests_get):
+    # covers: C000F004E0002, C000F004E0004, C000F004E0006
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"id": "123", "name": "Alice"}
+    mock_requests_get.return_value = mock_response
+    
+    result = fetch_user_data("123")
+    
+    assert result == {"id": "123", "name": "Alice"}
+    mock_requests_get.assert_called_once_with("https://api.example.com/users/123")
+
+def test_fetch_user_data_raises_on_empty_id():
+    # covers: C000F004E0001, C000F004E0003
+    with pytest.raises(ValueError, match="user_id required"):
+        fetch_user_data("")
+
+def test_fetch_user_data_raises_on_api_error(mock_requests_get):
+    # covers: C000F004E0002, C000F004E0004, C000F004E0005
+    mock_response = Mock()
+    mock_response.status_code = 404
+    mock_requests_get.return_value = mock_response
+    
+    with pytest.raises(RuntimeError, match="API error: 404"):
+        fetch_user_data("999")
+```
+
+**Deliverable:** Runnable test unit where all test functions execute and cover
+all reachable EI IDs.
+
+**Note:** If using generative AI and the AI cannot run tests itself, manual
+intervention is required:
+1. Run the tests yourself
+2. Provide error output to AI
+3. AI makes corrections
+4. Repeat until tests pass
+
+**Verification Gate:**
+- [ ] All test functions are implemented
+- [ ] Tests are runnable (syntax valid, imports correct)
+- [ ] All reachable EI IDs covered
+- [ ] All mocks set up correctly
+- [ ] Unit isolation maintained (no external calls leak through)
+
+---
+
+#### Stage 6: Refinement (Bounded)
+
+**Purpose:** Strengthen assertions and reduce duplication without changing the
+structure.
+
+**When:** After Stage 5 is complete and all tests pass.
+
+**Process:** Single-pass refinement, bounded to one sweep.
+
+**Allowed Improvements:**
+- Stronger assertions based on an explicit unit contract
+- Reduced duplication through parameterization or helpers
+- Clearer naming and readability
+- Improved mock clarity and call site correctness
+- Better error message assertions (more specific substrings)
+
+**Forbidden Changes:**
+- Changing EI-to-case mapping from Stage 1
+- Changing which EI IDs are covered by which tests
+- Structural rewrites
+- New test functions or removed test functions
+- Coupling to implementation details
+
+**Stop Condition:** When improvements lack determinism or require guessing.
+
+**Example Refinement:**
+
+Before:
+```python
+def test_classify_value_positive():
+    assert classify_value(5) == "positive"
+
+def test_classify_value_negative():
+    assert classify_value(-3) == "negative"
+```
+
+After (reduced duplication via parameterization):
+```python
+@pytest.mark.parametrize("input,expected", [
+    (5, "positive"),
+    (-3, "negative"),
+])
+def test_classify_value_returns(input, expected):
+    assert classify_value(input) == expected
+```
+
+**Verification Gate:**
+- [ ] No EI coverage lost
+- [ ] Tests still pass
+- [ ] Assertions stronger (if deterministic improvement exists)
+- [ ] Duplication reduced (if possible without churn)
+
+---
+
+#### Stage 7: Stop Condition
+
+**Stop when:**
+- All reachable EI IDs are covered, AND
+- Unit isolation constraints are satisfied (all external influences mocked), AND
+- Assertions provide sufficient proof without brittleness or invention
+
+**Verification:** Run the coverage tool and confirm that the tests provide 100%
+EI coverage for the unit.
+
+**If coverage < 100%:**
+- Check the ledger for UNREACHABLE EIs (and exclude from the coverage target)
+- Check for BLOCKED EIs (see Section 4)
+- Identify which EI IDs are missing coverage
+- Add case rows for missing EIs
+- Return to Stage 2 to integrate new case rows
+
+**Output:** Complete unit test file, ready for commit.
+
+---
+
+## 4. Blocked EI Protocol
+
+### 4.1 Purpose
+
+A blocked EI must not prevent progress. If any EI IDs cannot be tested without
+guessing, continue and complete all unblocked EIs first, then report blocked
+EIs explicitly.
+
+### 4.2 Definition of Blocked
+
+An EI ID is **BLOCKED** if reaching it, or asserting its outcome, requires
+missing information that cannot be derived from the unit and ledger without
 guessing.
 
-Commonly blocked causes include:
-- unknown callable signature required to call the code
-- branch trigger cannot be mapped to inputs or mocks from ledger facts
-- the expected exception type or message substring is unavailable and cannot be
-  inferred deterministically
-- required fakes, fixtures, helpers, or utilities are referenced but not
-  available
-- the required patch point is ambiguous from the unit and ledger
+**Common causes:**
+- Unknown callable signature required to call the code
+- Branch trigger cannot be mapped to inputs or mocks from ledger facts
+- Expected exception type or message substring is unavailable
+- Required fakes, fixtures, or utilities are referenced but not provided
+- The required patch target is ambiguous from unit and ledger
 
-Blocked condition is determined per Branch ID.
+**Blocked status is determined per EI ID.**
 
-### Required output when Branch ID is blocked
+### 4.3 Required Output
 
-When any Branch IDs are blocked, the generated test unit must include:
+When any EI IDs are blocked, the test file must include:
 
-1. A BLOCKED BRANCHES comment block, keyed by Branch ID, describing:
-   - `why`: reason the branch is blocked
-   - `need`: the minimal missing input needed to unblock it. Must name a
-     concrete artifact (unit snippet, signature, exception type or message,
-     helper fake or fixture, patch target)
-   - `impact`: localized to this specific branch, or list other impacted Branch
-     IDs and the nature of the impact
-   - optional fields: flexibility to include other relevant information
-     - `info`: must be short and must not include invented expectations
-     - `action`: single-sentence unblock action. Must state what the user can
-       provide or change to resolve the block (clear and unambiguous)
+**1. BLOCKED EI IDs Comment Block:**
 
-2. A placeholder test for each blocked Branch ID, marked as expected failure (or
-   skip) by using the appropriate framework mechanism, with a reason that
-   references the missing input. The placeholder test must list the Branch ID
-   in its covers comment.
+Format (adapt comment syntax to your language):
+```python
+# BLOCKED EI IDs
+# - <EI_ID>:
+#     why: <reason the EI is blocked>
+#     need: <concrete artifact needed to unblock>
+#     impact: <scope of impact>
+#     info: <optional: brief additional context>
+#     action: <what user can provide to unblock>
+```
 
-The placeholder tests exist to keep blocked work visible and to allow the
-user to supply missing inputs and regenerate the tests later.
+Fields:
+- `why`: Reason the EI is blocked
+- `need`: Minimal missing input (must name concrete artifact: code snippet,
+  signature, exception type, fixture name, patch target)
+- `impact`: "Localized to this EI" or list other impacted EI IDs
+- `info` (optional): Brief additional context (no invented expectations)
+- `action`: Single-sentence unblock action (clear, unambiguous)
 
-### Example format
+**2. Placeholder Test:**
 
-This example uses Python to demonstrate the placeholder test format. Use the
-appropriate explicit failure (or skip) mechanisms in the language that the
-project tests are written in.
+Create a test function for each blocked EI, marked as expected failure (adapt
+this mechanism to your test framework):
 
-    # BLOCKED BRANCHES
-    # - C000F002B0004:
-    #     why: trigger mapping not derivable from ledger facts
-    #     need: unit snippet for <callable> showing the branch condition
-    #     impact: all other reachable branches covered; this one pending
-    #     info: ledger does not identify which input controls this branch
-    #     action: paste <callable> body or add ledger note mapping the
-    #             condition to specific inputs or mocks
+**Python (pytest):**
+```python
+import pytest
 
-    import pytest
+@pytest.mark.xfail(reason="Blocked: missing trigger mapping for C000F002E0004")
+def test_blocked_C000F002E0004():
+    # covers: C000F002E0004
+    assert False, "EI blocked - see BLOCKED EI IDs comment"
+```
 
-    @pytest.mark.xfail(
-        reason="Blocked: missing trigger mapping for C000F002B0004"
-    )
-    def test_blocked_C000F002B0004():
-        # covers: C000F002B0004
-        assert False
+**Java (JUnit 5):**
+```java
+@Test
+@Disabled("Blocked: missing trigger mapping for C000F002E0004")
+void test_blocked_C000F002E0004() {
+    // covers: C000F002E0004
+    fail("EI blocked - see BLOCKED EI IDs comment");
+}
+```
 
-### No stall requirement
+**C# (xUnit):**
+```csharp
+[Fact(Skip = "Blocked: missing trigger mapping for C000F002E0004")]
+public void Test_Blocked_C000F002E0004()
+{
+    // covers: C000F002E0004
+    Assert.True(false, "EI blocked - see BLOCKED EI IDs comment");
+}
+```
 
-If blocked branches exist, do not stop and do not expand analysis. Emit runnable
-tests for all unblocked branches first, then emit the blocked branch report and
-placeholders.
+Purpose: Keep blocked work visible and allow user to supply missing inputs and
+regenerate tests later.
+
+### 4.4 Example
+
+```python
+# BLOCKED EI IDs
+# - C000F002E0004:
+#     why: trigger mapping not derivable from ledger facts
+#     need: code snippet for parse_config showing the branch condition at line 47
+#     impact: all other reachable EIs covered; this one pending
+#     info: ledger does not identify which input parameter controls this branch
+#     action: paste parse_config function body or add ledger note mapping
+#             the condition to specific inputs or mock configurations
+
+import pytest
+
+@pytest.mark.xfail(reason="Blocked: missing trigger mapping for C000F002E0004")
+def test_blocked_C000F002E0004():
+    # covers: C000F002E0004
+    assert False, "EI blocked - see BLOCKED EI IDs comment"
+```
+
+### 4.5 No-Stall Requirement
+
+If blocked EIs exist:
+- Do NOT stop test generation
+- Do NOT expand analysis or search for solutions
+- Emit runnable tests for all unblocked EIs first
+- Then emit the blocked EI report and placeholders
+- Move forward
 
 ---
 
-## Test writing rules
+## 5. Test Writing Rules
 
-### Mocking rules
+### 5.1 Mocking Strategy
 
-- Mock at the call site used by the unit under test, using the project’s
-  standard mocking mechanism.
-- Use project-provided fakes and helpers when available. Do not re-create fakes
-  if a helper already exists.
+**Using Integration Facts from the Ledger:**
 
-### Assertions
+The Unit Ledger contains integration facts (Document 2: callable.integration)
+that tell you exactly what needs mocking:
 
-- For error cases: assert key substrings, not full stack traces.
-- Prefer user meaningful wording: project, version, strategy name, URL, policy
-  mode.
-- Assert behavior, not implementation details, unless branch coverage requires
-  it.
+```yaml
+# From ledger
+integration:
+  interunit:
+    - id: IC000F001E0004
+      target: validate_typed_dict
+      kind: call
+      executionPaths: [[C000F001E0004]]
+  boundaries:
+    - id: IC000F001E0007
+      target: requests.get
+      kind: call
+      boundary:
+        kind: network
+        protocol: http
+      executionPaths: [[C000F001E0003, C000F001E0007]]
+```
 
-### Branch coverage labeling
+This tells you:
+1. **What to mock:** `validate_typed_dict` (interunit),
+  `requests.get` (boundary)
+2. **Where to mock:** At the call site in the unit under test
+3. **How to reach it:** Follow executionPaths to determine what conditions
+  trigger these calls
 
-Each test must state which Branch IDs it covers. A comment is sufficient:
+**Mocking Rules:**
 
-    # covers: C000F001B0001, C000F001B0002
+1. **Mock at the call site** used by the unit under test
+2. **Use the project's standard mocking mechanism** (pytest fixtures,
+   unittest.mock, etc.)
+3. **Use project-provided fakes and fixtures** when available – do not recreate
+   them
+4. **Mock all boundaries** identified in integration facts (network, filesystem,
+   database, etc.)
+5. **Mock all interunit calls** - don't let adjacent units execute
+
+**Example:**
+
+```python
+from unittest.mock import patch, Mock
+
+@patch('myunit.requests.get')  # Mock at the call site in myunit
+def test_fetch_data(mock_get):
+    # Set up mock response
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"result": "success"}
+    mock_get.return_value = mock_response
+    
+    # Execute
+    result = fetch_data("test")
+    
+    # Assert
+    assert result == {"result": "success"}
+    mock_get.assert_called_once()
+```
+
+### 5.2 Assertions
+
+**For Return Cases:**
+- Assert return value matches expected
+- Use equality checks (`==`) for simple values
+- Use structural assertions (`isinstance`, `len`) for complex objects
+- Assert key fields, not entire object graphs (avoid brittleness)
+
+**For Exception Cases:**
+- Assert the exception type
+- Assert key substrings in the message (not the full message – too brittle)
+- Prefer user-meaningful wording: project names, version numbers, strategy
+  names, URL patterns, policy modes
+
+**Examples:**
+
+```python
+# Good: Key substring
+with pytest.raises(
+        ValueError,
+        match="Invalid environment key"):
+    validate_config(bad_config)
+
+# Bad: Full message (brittle)
+with pytest.raises(
+        ValueError,
+        match="Invalid environment key: DEBUG_MODE not in allowed keys: ['LOG_LEVEL', 'API_URL']"):
+    validate_config(bad_config)
+
+# Good: Behavior assertion
+assert len(result) == 3
+assert all(isinstance(item, Config) for item in result)
+
+# Bad: Implementation detail
+assert result._internal_cache is not None
+```
+
+**Assertion Principles:**
+- Assert behavior, not implementation details (unless EI coverage requires it)
+- Prefer minimal assertions sufficient to prove the EI outcome
+- Strengthen assertions in Stage 6 if deterministic improvements exist
+- Stop strengthening when improvements require guessing
+
+### 5.3 EI Coverage Labeling
+
+**Every test must state which EI IDs it covers.**
+
+**Format:** Comment with `covers:` prefix
+
+```python
+def test_classify_value_positive():
+    # covers: C000F001E0001, C000F001E0003
+    assert classify_value(5) == "positive"
+```
+
+**For parameterized tests:**
+
+Option 1: Include in parameter data
+```python
+@pytest.mark.parametrize("input,expected,covers", [
+    (5, "positive", ["C000F001E0001", "C000F001E0003"]),
+    (-3, "negative", ["C000F001E0002", "C000F001E0004"]),
+])
+def test_classify_value(input, expected, covers):
+    # covers: see parameter
+    assert classify_value(input) == expected
+```
+
+Option 2: List all in function comment
+```python
+@pytest.mark.parametrize("input,expected", [
+    (5, "positive"),
+    (-3, "negative"),
+])
+def test_classify_value(input, expected):
+    # covers: C000F001E0001, C000F001E0002, C000F001E0003, C000F001E0004
+    assert classify_value(input) == expected
+```
+
+**Why this matters:**
+- Enables verification that all EI IDs are covered
+- Makes coverage gaps visible during code review
+- Allows regeneration of specific tests when code changes
+- Documents the ledger-to-test mapping
 
 ---
 
-## Unit notes (optional guidance)
+## 6. Complete Worked Example
 
-This section is intentionally general. It exists to assist in identifying common
-branch categories. If supplemental project- or domain-specific instructions
-exist, they should take precedence over this section where applicable.
-Supplemental instructions should name the domain concepts and expected branch
-buckets explicitly so that the case matrix and tests can cover those conditions.
+This section shows the full workflow from ledger to tests.
 
-### High churn units (many branches, many conditionals)
+### 6.1 The Unit Under Test
 
-Common branch bucket examples:
-- input classification: multiple accepted shapes or encodings
-- path and identifier handling: absolute vs. relative, normalization, invalid
-  characters, empty values
-- mode selection: strict vs. permissive, debug vs. normal, dry run vs. apply
-- optional feature gates: enabled vs. disabled
-- filtering: keep vs. drop, drop all vs. drop some
-- preference ordering: stable deterministic tie breaking
-- empty results: no candidates, no matches, no applicable options
-- ambiguity: multiple matches vs. exactly one match
-- error shaping: specific error type and message contains key context
-- caching: cache hit vs. miss, cache invalidation paths
-- policy enforcement: allowlist vs. denylist, opt in vs. opt out
-- data integrity: missing fields, inconsistent state, duplicates
+```python
+# validation.py
+def classify_value(x: int) -> str:
+    """Classify an integer as negative, zero, or positive."""
+    if x < 0:
+        return "negative"
+    if x == 0:
+        return "zero"
+    return "positive"
+```
 
-### Strategy or orchestration units
+### 6.2 The Unit Ledger (Excerpts)
 
-Common branch bucket examples:
-- strategy chosen vs. not chosen
-- preconditions pass vs. fail
-- early exit vs. full execution
-- success vs. handled failure vs. unhandled failure
-- optional callback present vs. None
-- dependency interaction: dependency raises vs. returns sentinel vs. returns value
-- aggregation: multiple errors combined vs. first error stops execution
-- fallback: the primary path fails, then the fallback path runs
-- idempotency: repeated call yields the same result vs. changes behavior
+**Document 2 (Ledger) - Relevant Section:**
 
-### Planning or DI units (construction, validation, ordering)
+```yaml
+- id: C000F001
+  kind: callable
+  name: classify_value
+  signature: 'classify_value(x: int) -> str'
+  callable:
+    params:
+      - name: x
+        type:
+          name: int
+    returnType:
+      name: str
+    branches:
+      - id: C000F001E0001
+        condition: 'if x < 0'
+        outcome: 'returns "negative"'
+      - id: C000F001E0002
+        condition: 'else'
+        outcome: 'continues to next check'
+      - id: C000F001E0003
+        condition: 'if x == 0'
+        outcome: 'returns "zero"'
+      - id: C000F001E0004
+        condition: 'else'
+        outcome: 'continues to final return'
+      - id: C000F001E0005
+        condition: 'final return'
+        outcome: 'returns "positive"'
+```
 
-Common branch bucket examples:
-- discovery: explicit registration vs. dynamic discovery
-- binding: explicit config vs. defaults
-- override precedence: user value overrides default vs. ignored vs. rejected
-- validation: accepts flexible kwargs vs. strict signature
-- duplicate identifiers: allowed vs. rejected
-- missing dependency: required missing vs. optional missing
-- dependency graph: acyclic vs. cycle detected
-- ordering: stable topological order vs. failure to order
-- nested structures: shallow vs. deep traversal
-- error reporting: single cause vs. multiple causes with context
+### 6.3 Stage 1: Case Rows
+
+```python
+case_rows = [
+    {
+        "callable_id": "C000F001",
+        "ei_ids": ["C000F001E0001"],
+        "inputs": {"x": -5},
+        "outcome_kind": "returns",
+        "expected": "negative",
+        "patch_targets": [],
+    },
+    {
+        "callable_id": "C000F001",
+        "ei_ids": ["C000F001E0002", "C000F001E0003"],
+        "inputs": {"x": 0},
+        "outcome_kind": "returns",
+        "expected": "zero",
+        "patch_targets": [],
+    },
+    {
+        "callable_id": "C000F001",
+        "ei_ids": ["C000F001E0002", "C000F001E0004", "C000F001E0005"],
+        "inputs": {"x": 10},
+        "outcome_kind": "returns",
+        "expected": "positive",
+        "patch_targets": [],
+    },
+]
+```
+
+All 5 EI IDs covered: ✓
+
+### 6.4 Stage 2: Buckets
+
+All case rows have same harness key: `("C000F001", "returns", ())`
+
+```python
+buckets = {
+    ("C000F001", "returns", ()): [case_row_1, case_row_2, case_row_3]
+}
+```
+
+### 6.5 Stage 3: Test Function
+
+```python
+@pytest.mark.parametrize("x,expected,covers", [
+    (-5, "negative", ["C000F001E0001"]),
+    (0, "zero", ["C000F001E0002", "C000F001E0003"]),
+    (10, "positive", ["C000F001E0002", "C000F001E0004", "C000F001E0005"]),
+])
+def test_classify_value(x, expected, covers):
+    # covers: see parameter
+    assert classify_value(x) == expected
+```
+
+### 6.6 Stage 5: Implementation
+
+(Already implemented in Stage 3 for this simple example)
+
+### 6.7 Stage 6: Refinement
+
+Could add more test cases for better validation:
+
+```python
+@pytest.mark.parametrize("x,expected,covers", [
+    (-5, "negative", ["C000F001E0001"]),
+    (-1, "negative", ["C000F001E0001"]),  # Additional case
+    (0, "zero", ["C000F001E0002", "C000F001E0003"]),
+    (1, "positive", ["C000F001E0002", "C000F001E0004", "C000F001E0005"]),  # Additional
+    (10, "positive", ["C000F001E0002", "C000F001E0004", "C000F001E0005"]),
+])
+def test_classify_value(x, expected, covers):
+    # covers: see parameter
+    assert classify_value(x) == expected
+```
+
+### 6.8 Final Test File
+
+```python
+# test_validation.py
+import pytest
+from validation import classify_value
+
+
+@pytest.mark.parametrize("x,expected,covers", [
+    (-5, "negative", ["C000F001E0001"]),
+    (-1, "negative", ["C000F001E0001"]),
+    (0, "zero", ["C000F001E0002", "C000F001E0003"]),
+    (1, "positive", ["C000F001E0002", "C000F001E0004", "C000F001E0005"]),
+    (10, "positive", ["C000F001E0002", "C000F001E0004", "C000F001E0005"]),
+])
+def test_classify_value(x, expected, covers):
+    """Test classify_value with various inputs.
+    
+    Covers all 5 EI IDs for classify_value:
+    - C000F001E0001: x < 0 → negative
+    - C000F001E0002: x >= 0 → continue
+    - C000F001E0003: x == 0 → zero
+    - C000F001E0004: x > 0 → continue
+    - C000F001E0005: return positive
+    """
+    # covers: see parameter
+    assert classify_value(x) == expected
+```
+
+Coverage: 100% ✓
+
+---
+
+## 7. Common Testing Patterns
+
+This section identifies common branch categories to assist in creating case
+rows. If supplemental project- or domain-specific instructions exist, they take
+precedence.
+
+### 7.1 Input Classification Units
+
+Common EI buckets:
+- **Multiple accepted shapes or encodings** (dict vs. JSON string, absolute vs.
+  a relative path)
+- **Input validation** (valid, invalid characters, empty, null)
+- **Normalization** (case-insensitive, whitespace trimming, path normalization)
+- **Type coercion** (string to int, flexible vs. strict parsing)
+
+**Example EIs:**
+- E0001: input is dict → parse as dict
+- E0002: input is string → parse as JSON
+- E0003: input is None → raise ValueError
+- E0004: input is empty string → raise ValueError
+
+### 7.2 Conditional Logic Units
+
+Common EI buckets:
+- **Mode selection** (strict vs permissive, debug vs normal, dry-run vs apply)
+- **Feature gates** (feature enabled, feature disabled)
+- **Filtering** (keep vs. drop, empty results vs. some results vs. all results)
+- **Early exits** (precondition fails, precondition passes)
+
+**Example EIs:**
+- E0001: strict mode → validate all fields
+- E0002: permissive mode → validate required fields only
+- E0003: validation passes → continue
+- E0004: validation fails → raise exception
+
+### 7.3 Collection Processing Units
+
+Common EI buckets:
+- **Empty collection** (no items to process)
+- **Single item** (special case handling)
+- **Multiple items** (batch processing)
+- **All filtered out** (filter returns empty)
+- **Some pass filter** (partial results)
+
+**Example EIs:**
+- E0001: collection empty → return empty list
+- E0002: a collection has items, all filtered → return an empty list
+- E0003: a collection has items, some pass → return filtered list
+
+### 7.4 Error Handling Units
+
+Common EI buckets:
+- **Success path** (no errors)
+- **Expected errors** (handled exceptions with specific messages)
+- **Unexpected errors** (catch-all handlers)
+- **Retry logic** (the first attempt fails, retry succeeds)
+
+**Example EIs:**
+- E0001: operation succeeds → return result
+- E0002: operation raises ValueError → catch and handle
+- E0003: operation raises TypeError → catch and handle
+- E0004: operation raises other exception → propagate
+
+### 7.5 Integration/Boundary Units
+
+Common EI buckets:
+- **External call succeeds** (boundary returns expected data)
+- **External call fails** (boundary raises exception or returns error)
+- **Fallback paths** (primary fails, fallback succeeds)
+- **Caching** (cache hit, cache miss, cache invalidation)
+
+**Example EIs:**
+- E0001: API call returns 200 → parse and return data
+- E0002: API call returns 404 → raise NotFoundError
+- E0003: API call times out → raise TimeoutError
+- E0004: use cached data → skip API call
+
+### 7.6 Strategy/Selection Units
+
+Common EI buckets:
+- **Strategy selection** (which strategy applies based on conditions)
+- **Preference ordering** (stable deterministic tie-breaking)
+- **Best match** (multiple candidates, select best)
+- **Ambiguity** (no match, exactly one match, multiple matches)
+
+**Example EIs:**
+- E0001: no candidates → raise NoMatchError
+- E0002: exactly one match → return it
+- E0003: multiple matches, select by priority → return best
+- E0004: multiple matches, ambiguous → raise AmbiguousMatchError
+
+### 7.7 State Transition Units
+
+Common EI buckets:
+- **Valid transitions** (state A → state B allowed)
+- **Invalid transitions** (state A → state C forbidden)
+- **Idempotency** (repeated transition has no effect)
+- **Terminal states** (no transitions allowed)
+
+**Example EIs:**
+- E0001: current state is PENDING, transition to RUNNING → allowed
+- E0002: current state is PENDING, transition to COMPLETE → forbidden
+- E0003: current state is COMPLETE, any transition → forbidden
+- E0004: transition called twice → idempotent, no error
+
+---
+
+## Appendix A: Quick Reference
+
+### A.1 Workflow Checklist
+
+- [ ] Generate Unit Ledger (read spec first)
+- [ ] Validate ledger against schema
+- [ ] Review Document 3 for findings
+- [ ] Stage 1: Create case rows (one per reachable EI)
+- [ ] Stage 2: Partition into buckets (by harness key)
+- [ ] Stage 3: Realize test functions (parameterize or single)
+- [ ] Stage 4: Micro review (optional, bounded)
+- [ ] Stage 5: Implement tests (coverage first)
+- [ ] Stage 6: Refine (strengthen assertions, reduce duplication)
+- [ ] Stage 7: Verify 100% EI coverage
+- [ ] Run tests and confirm all pass
+- [ ] Commit test file
+
+### A.2 Harness Key Formula
+
+```python
+harness_key = (
+    callable_id,           # Which function/method
+    outcome_kind,          # "returns" or "raises"
+    tuple(sorted(patch_targets))  # Sorted list of mocks
+)
+```
+
+### A.3 Case Row Template
+
+```
+{
+    "callable_id": "<callable_id>",
+    "ei_ids": ["<ei_id_1>", "<ei_id_2>", ...],
+    "inputs": {<param_name>: <value>, ...},
+    "outcome_kind": "returns" | "raises",
+    "expected": <return_value> | <exception_type>,
+    "patch_targets": ["<mock_target_1>", ...],
+}
+```
+
+### A.4 Coverage Comment Format
+
+```python
+# covers: C000F001E0001, C000F001E0002, C000F001E0005
+```
+
+### A.5 Blocked EI Comment Format
+
+```python
+# BLOCKED EI IDs
+# - <EI_ID>:
+#     why: <reason>
+#     need: <concrete artifact>
+#     impact: <scope>
+#     action: <what user can provide>
+```
+
+### A.6 Common Mock Patterns
+
+```python
+# Mock HTTP call
+@patch('myunit.requests.get')
+def test_fetch(mock_get):
+    mock_get.return_value.status_code = 200
+    mock_get.return_value.json.return_value = {"data": "value"}
+
+# Mock filesystem
+@patch('myunit.open', mock_open(read_data="file contents"))
+def test_read_file(mock_file):
+    ...
+
+# Mock time
+@patch('myunit.time.time', return_value=1234567890)
+def test_timestamp(mock_time):
+    ...
+
+# Mock random
+@patch('myunit.random.random', return_value=0.5)
+def test_random(mock_random):
+    ...
+```
+
+---
+
+## Appendix B: Terminology Map
+
+**Old Term → New Term**
+
+- Branch → Execution Item (EI)
+- Branch ID → EI ID
+- Branch coverage → EI coverage (or branch coverage for external tools)
+- Callable branches → Callable EIs
+- Integration target → Integration fact
+
+**Backward Compatibility:**
+
+When communicating with coverage tools or team members unfamiliar with the Unit
+Ledger spec, "branch coverage" is acceptable and understood. Internally, use
+"EI" for precision.
+
+---
+
+## Appendix C: Validation Checklist
+
+Before committing tests, verify:
+
+**Ledger Alignment:**
+- [ ] Test file exists for the unit
+- [ ] Every reachable EI ID from the ledger has coverage
+- [ ] UNREACHABLE EIs excluded from the coverage target
+- [ ] BLOCKED EIs have placeholder tests
+
+**Unit Isolation:**
+- [ ] No unmocked external calls (network, filesystem, database, etc.)
+- [ ] No unmocked interunit calls
+- [ ] All boundaries are mocked (check ledger integration facts)
+- [ ] Tests run fast (no I/O delays)
+
+**Test Quality:**
+- [ ] All tests pass
+- [ ] Coverage tool reports 100% (excluding UNREACHABLE)
+- [ ] Every test has a coverage comment
+- [ ] Parameterization used where appropriate
+- [ ] Assertions are specific and non-brittle
+- [ ] Mock setup is clear and correct
+
+**Code Quality:**
+- [ ] Test names are descriptive
+- [ ] No duplication (extracted to helpers/fixtures)
+- [ ] Code is readable and maintainable
+- [ ] Follows project conventions
+
+---
+
+**END OF CONTRACT**
