@@ -34,6 +34,84 @@ Quick reference of what creates EIs in Java:
 - **Null safety:** Optional methods (map, flatMap, orElse, etc.)
 - **Short-circuit evaluation:** && (AND), || (OR) operators
 
+### 1.3 Unit Boundaries
+**Unit Definition**: In Java, a unit is an item (typically, it is a class or
+interface) that is compiled into a single `.class` file, regardless of how the
+`.java` source file is organized. In addition to a class or an interface, other
+constructs are units:
+- Enum
+- Annotation
+- Nested class
+
+As an example, consider how a single `MyClass.java` file could contain many of
+these constructs, resulting in many `.class` files that represent distinct
+units:
+
+```java
+public class MyClass {                                 // → MyClass.class
+    
+    // Nested static class
+    public static class Registry {                     // → MyClass$Registry.class
+        private final Map<String, Item> items = new HashMap<>();
+    }
+    
+    // Inner (non-static) class  
+    public class Session {                             // → MyClass$Session.class
+        public void doWork() {
+            // Anonymous class inside a method
+            Runnable task = new Runnable() {           // → MyClass$Session$1.class
+                @Override
+                public void run() {
+                    System.out.println("Anonymous magic!");
+                }
+            };
+            
+            // Local class inside a method
+            class LocalHelper {                        // → MyClass$Session$1LocalHelper.class
+                void help() { }
+            }
+        }
+    }
+}
+
+// Interface (top-level, package-private)
+interface Pluggable {                                  // → Pluggable.class
+    void activate();
+}
+
+// Enum (top-level, package-private)
+enum Status {                                          // → Status.class
+    ACTIVE, INACTIVE, PENDING
+}
+
+// Annotation definition (top-level, package-private)
+@interface Experimental {                              // → Experimental.class
+    String since() default "";
+}
+
+// Another package-private class
+class HelperUtils {                                    // → HelperUtils.class
+    static void assist() { }
+}
+```
+
+Therefore, a single `.java` source file may contain multiple units. 
+
+**Rationale**: This aligns with Java's compilation model (one `.class` file per
+type), the JVM's class-loading architecture, and typical testing practices where
+a `MyClassTest.java` tests all methods of `MyClass.class` as a cohesive unit. It
+also reflects how mocking frameworks (like Mockito) operate at class boundaries
+and how dependency injection containers wire classes together.
+
+**Important implications**:
+1. When creating unit ledgers, a ledger contains all information for a single
+   unit. If a `.java` source file contains multiple units, then one separate
+   ledger must be created for each unit. The fact that the unit is designated
+   with an ID of `C000` means that only one unit may be present in a ledger.
+2. With in the same `.java` source file, if code in one unit calls a method in
+   another unit from the same file, then the method call is considered an
+   integration.
+
 ## 2. Identifying Execution Items
 
 ### 2.1 Simple Statements (1 EI per line)

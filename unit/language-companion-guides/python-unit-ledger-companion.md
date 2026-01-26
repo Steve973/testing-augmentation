@@ -42,7 +42,7 @@ While this can be interpreted differently across different projects and
 different teams, it is the assumption in this guide. For consistency and for
 convention, we recommend that implementations should follow this convention.
 
-Rationale: This aligns with Python's module system, import conventions, and
+**Rationale**: This aligns with Python's module system, import conventions, and
 typical testing practices where a `test_X.py` file tests all of `X.py` as a
 cohesive unit.
 
@@ -178,7 +178,117 @@ outcome_map:
 ```
 
 ##### EI Assignment
-2 EIs: one for true path, one for false path.
+2 EIs: one for the `true` path, one for the `false` path.
+
+#### 2.1.5 Chained Operations
+
+A somewhat similar, but distinct, pattern is the chaining of method calls. In
+this case, it is **likely** that each invocation that comprises the chain should
+be treated as an EI. However, this rule is not absolute since it depends on the
+operation being considered. For example, if the first operation is a call to the
+default constructor, and if it can only ever result in the creation of an
+instance, then it does not need to be treated as a separate EI. The distinct
+outcomes of the instantiation, coupled with a method call directly on this
+"inlined" instance, are solely dependent on the invoked operation.
+
+##### A Note About This Chaining Case
+This case applies only to chained operations. This refers to chained operations
+on a single line, or chained operations formatted to extend over multiple lines.
+For example:
+
+```python
+# Chained operations on a single line
+response = requests.get(url).json()
+
+# Chained operations formatted to extend over multiple lines
+result = (requests
+    .get(url)
+    .json())
+```
+
+If an operation in the chain is deterministic and cannot produce multiple
+distinct outcomes, it may be combined with the following operation in the chain
+as a single EI. This does NOT apply to separate statements (on different lines),
+since each executable line maintains one or more of its own EI enumerations,
+regardless of whether prior operations were deterministic. For example:
+
+```python
+parser = Parser()            # EI 1 (separate statement)
+msg = parser.parsestr(text)  # EI 2 (separate statement)
+```
+
+##### Chained Operations with Multiple EIs
+This example shows chaining where each operation needs to be treated as an EI.
+
+##### Source Code
+```python
+response = requests.get(url).json()
+```
+
+##### Outcome Path Analysis
+```yaml
+outcome_map:
+  42: ["requests.get(url) succeeds → continues to .json()",
+       "requests.get(url) raises exception → exception propagates",
+       ".json() succeeds → response assigned",
+       ".json() raises JSONDecodeError → exception propagates"]
+```
+
+##### EI Count
+4 EIs:
+- `requests.get(url)` can succeed or raise an exception (network failure, timeout, etc.) = 2 EIs
+- `.json()` can succeed or raise JSONDecodeError = 2 EIs
+
+##### YAML Representation
+```yaml
+branches:
+  - id: C000F001E0001
+    condition: 'requests.get(url) succeeds'
+    outcome: 'returns Response object, continues to .json()'
+  - id: C000F001E0002
+    condition: 'requests.get(url) raises exception'
+    outcome: 'exception propagates (network failure, timeout, etc.)'
+  - id: C000F001E0003
+    condition: '.json() succeeds'
+    outcome: 'response assigned with parsed JSON'
+  - id: C000F001E0004
+    condition: '.json() raises JSONDecodeError'
+    outcome: 'exception propagates (malformed JSON)'
+```
+
+##### Chained Operation With Single EI
+This example shows a deterministic constructor chained to a method call on the
+resulting instance. This requires only a single EI for our purposes.
+
+##### Source Code
+```python
+msg = Parser().parsestr(text)
+```
+
+##### Outcome Path Analysis
+```yaml
+outcome_map:
+  99: ["msg = Parser().parsestr(text)"]
+```
+
+##### EI Count
+1 EI: The `Parser()` constructor is deterministic and always succeeds – it simply
+assigns instance variables with default values. The distinct outcomes (success or
+parse failure) are solely dependent on the `parsestr(text)` operation.
+
+##### YAML Representation
+```yaml
+branches:
+  - id: C001M003E0001
+    condition: 'executes'
+    outcome: 'msg = Parser().parsestr(text)'
+```
+
+##### Key Distinction
+- **Multiple EIs**: When each operation in the chain can produce distinct outcomes
+  (success/failure)
+- **Single EI**: When earlier operations in the chain are deterministic (always
+  succeed), only the first operation with branching behavior creates EIs
 
 #### 2.2.2 If Without Else
 Creates 2 EIs:
