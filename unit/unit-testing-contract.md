@@ -1147,7 +1147,94 @@ Common EI buckets:
 - E0003: current state is COMPLETE, any transition → forbidden
 - E0004: transition called twice → idempotent, no error
 
----
+### 7.8 Language Construct Verification Units
+
+Some language constructs establish contracts that should be verified even though
+they don't create execution items (EIs) in the ledger.
+
+#### 7.8.1 Enum Value Contracts
+
+**What to test:**
+- Enum members exist
+- Enum values match expected strings/integers
+- No accidental deletions or modifications
+
+**Why:** Protects against refactoring errors and typos that break the enum contract.
+
+**Example (Python):**
+```python
+def test_requires_dist_url_policy_enum_values():
+    """Verify RequiresDistUrlPolicy enum contract."""
+    assert RequiresDistUrlPolicy.HONOR.value == "honor"
+    assert RequiresDistUrlPolicy.IGNORE.value == "ignore"
+    assert RequiresDistUrlPolicy.RAISE.value == "raise"
+    # Verify all expected members exist
+    assert set(RequiresDistUrlPolicy) == {
+        RequiresDistUrlPolicy.HONOR,
+        RequiresDistUrlPolicy.IGNORE,
+        RequiresDistUrlPolicy.RAISE
+    }
+```
+
+**Ledger relationship:** Enum definitions create no EIs. This test verifies the
+contract, not execution paths. As such, these tests will not be a direct result
+of enumerated EI IDs. They will be a result of parsing the unit at test
+creation time.
+
+#### 7.8.2 Data Class Contracts
+
+**What to test:**
+- Field existence and default values
+- Immutability constraints
+  - Python: `frozen=True`
+  - Java: `@Value` when using Lombok
+- Basic construction with and without arguments
+
+**Why:** Data class constructs auto-generate code outside the unit. Tests should
+verify the contract established by the decorator. Constructs vary by language.
+For example:
+- Python: `dataclass`
+- Java: `@Value` when using Lombok, or record classes
+
+**Example (Python):**
+```python
+def test_resolution_result_dataclass_contract():
+    """Verify ResolutionResult dataclass contract."""
+    # Test default construction
+    result = ResolutionResult()
+    assert result.requirements_by_env == {}
+    assert result.resolved_wheels_by_env == {}
+    
+    # Test construction with values
+    result = ResolutionResult(
+        requirements_by_env={"env1": "reqs"},
+        resolved_wheels_by_env={"env1": ["wheel1"]}
+    )
+    assert result.requirements_by_env == {"env1": "reqs"}
+    assert result.resolved_wheels_by_env == {"env1": ["wheel1"]}
+    
+    # Test immutability (if frozen=True)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.requirements_by_env = {}
+```
+
+**Ledger relationship:** Dataclass-generated methods create no EIs in the source
+file. This test verifies the dataclass contract, not execution paths in the
+unit. As such, these tests will not be a direct result of enumerated EI IDs.
+They will be a result of parsing the unit at test creation time.
+
+#### 7.8.3 When to Use Construct Verification
+
+**Use construct verification tests when:**
+- Language features auto-generate code (dataclasses, enums, properties)
+- The generated code establishes a contract
+- Changes to the contract would break callers
+- The auto-generated code is not in the unit's source file
+
+**Do NOT use construct verification for:**
+- Methods explicitly written in the source file (these have EIs)
+- Internal implementation details that are not exposed as contracts
+- Constructs where the language guarantees the behavior
 
 ## Appendix A: Quick Reference
 
@@ -1280,6 +1367,38 @@ Before committing tests, verify:
 - [ ] No duplication (extracted to helpers/fixtures)
 - [ ] Code is readable and maintainable
 - [ ] Follows project conventions
+
+### C.1 Coverage Calculation Notes
+
+**What counts toward EI coverage:**
+- Only EIs enumerated in the Unit Ledger
+- EIs must be in source code files within the unit boundary
+- UNREACHABLE EIs are excluded from the coverage target
+
+**What does NOT count toward EI coverage:**
+- Auto-generated code from decorators (dataclasses, enums, properties)
+- Code in external libraries or frameworks
+- Language runtime behavior
+- Metaprogramming-generated methods
+
+**Example scenarios:**
+
+| Scenario                            | Has EIs? | Should Test?  | Test Type             |
+|-------------------------------------|----------|---------------|-----------------------|
+| Explicit method in source file      | Yes      | Yes           | EI coverage           |
+| Dataclass `__init__`                | No       | Yes           | Contract verification |
+| Enum class definition               | No       | Yes           | Contract verification |
+| Enum constructor call `MyEnum(val)` | Yes      | Yes           | EI coverage           |
+| `@property` decorated method        | Yes      | Yes           | EI coverage           |
+| Standard library call               | No       | Mock in tests | Not directly tested   |
+
+**Coverage tool interpretation:**
+Coverage tools may report branches in auto-generated code. These do NOT need to
+be covered to meet the 100% EI coverage goal, since they are not enumerated in
+the Unit Ledger. Focus on the ledger as the authoritative coverage inventory. If
+you specifically want to test auto-generated code, then you will need to add
+tests manually, since that is not a function of the ledger, or of this unit
+testing augmentation process.
 
 ---
 

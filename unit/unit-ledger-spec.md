@@ -1105,10 +1105,14 @@ assert all_eis_in_paths.issubset(stage2_ei_ids), "Unknown EI in path"
 **Document 3 validation:**
 
 - [ ] docKind is "ledger-generation-review"
-- [ ] schemaVersion is present and valid format
+- [ ] schemaVersion is present and its format is valid
 - [ ] unit.name matches Documents 1 and 2
 - [ ] unit.language matches Documents 1 and 2
-- [ ] findings list exists (may be empty)
+- [ ] unit.callablesAnalyzed reflects the number of callables analyzed
+- [ ] unit.totalExeItems reflects the number of EIs enumerated
+- [ ] unit.interunitIntegrations reflects the number of interunit integrations enumerated
+- [ ] unit.boundaryIntegrations reflects the number of boundary integrations enumerated
+- [ ] findings list exists (can be empty)
 - [ ] Every finding has: severity, category, message
 - [ ] Severity is one of: info, warn, error
 
@@ -1190,7 +1194,7 @@ Before delivering the ledger, verify:
 
 **If any mandatory gate fails:**
 
-1. **Stop immediately** - Do not proceed to next stage
+1. **Stop immediately** – Do not proceed to next stage
 2. **Report failure** with specific gate that failed
 3. **Provide context** (line number, callable ID, specific issue)
 4. **Suggest fix** if deterministic
@@ -1207,11 +1211,11 @@ Before delivering the ledger, verify:
   Fix: Review Stage 1 outcome map for line-to-EI assignment
 ```
 
-**If warning gate triggers:**
+**If a warning gate triggers:**
 
-1. **Continue processing** - Warnings don't block progress
+1. **Continue processing** – Warnings don't block progress
 2. **Log to Document 3** as finding with severity: warn
-3. **Include in stage summary**
+3. **Include it in the stage summary**
 
 **Example warning report:**
 
@@ -2190,6 +2194,10 @@ schemaVersion: "1.0.0"
 unit:
   name: example
   language: python
+  callablesAnalyzed: 7
+  totalExeItems: 70
+  interunitIntegrations: 6
+  boundaryIntegrations: 4
 findings:
   - severity: info
     category: assumption

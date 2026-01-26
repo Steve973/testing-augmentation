@@ -159,27 +159,6 @@ result = outer(inner(), simple_var)
 ```
 At least 2 EIs: `inner()` and `outer()` - the variable doesn't add an EI
 
-### 2.2 Conditional Constructs
-
-#### 2.2.1 If/Else Statements
-##### Source Code
-```python
-if user.is_authenticated:
-    grant_access()
-else:
-    deny_access()
-```
-
-##### Outcome Path Analysis
-```yaml
-outcome_map:
-  10: ["user.is_authenticated true → enters if block",
-       "user.is_authenticated false → enters else block"]
-```
-
-##### EI Assignment
-2 EIs: one for the `true` path, one for the `false` path.
-
 #### 2.1.5 Chained Operations
 
 A somewhat similar, but distinct, pattern is the chaining of method calls. In
@@ -289,6 +268,120 @@ branches:
   (success/failure)
 - **Single EI**: When earlier operations in the chain are deterministic (always
   succeed), only the first operation with branching behavior creates EIs
+
+#### 2.1.6 Operations That Can Raise Exceptions
+
+**Critical Rule:** Operations that can raise exceptions create additional
+execution outcomes, **even without explicit try/except blocks**.
+
+When analyzing a line with an operation call, always consider:
+1. Does this operation succeed?
+2. Can this operation fail non-exceptionally?
+3. Can this operation raise an exception?
+
+If yes to any of these, enumerate separate EIs for each possible outcome.
+
+##### Examples
+
+**Enum Constructor:**
+```python
+policy = RequiresDistUrlPolicy(value)
+```
+
+Creates **at least 2 EIs**:
+- `value` is valid → constructor succeeds, returns enum instance
+- `value` is invalid → raises `ValueError`
+
+**Type Conversion:**
+```python
+count = int(user_input)
+```
+
+Creates **at least 2 EIs**:
+- `user_input` is valid integer string → succeeds
+- `user_input` is invalid → raises `ValueError`
+
+**Dictionary Access:**
+```python
+name = config["name"]
+```
+
+Creates **at least 2 EIs**:
+- `"name"` key exists → succeeds
+- `"name"` key missing → raises `KeyError`
+
+##### When to Enumerate Exception Paths
+
+**Always enumerate for:**
+- Type conversions: `int()`, `float()`, `bool()`
+- Enum constructors: `MyEnum(value)`
+- Dictionary/list indexing without `.get()`: `d[key]`, `lst[idx]`
+- Operations documented to raise specific exceptions
+
+**Document as assumption for:**
+- External library calls where exception behavior is unclear
+- Custom classes from other units
+
+**Do NOT enumerate for:**
+- Operations using safe accessors: `d.get(key)`, exception-suppressing patterns
+- Operations inside try/except blocks (enumerate the except handlers instead)
+
+##### Integration with Nested Operations
+
+When operations appear as parameters (Section 2.1.4), each operation creates its
+minimum EI count based on whether it can raise exceptions:
+```python
+result = process(int(user_input))
+```
+
+Creates **at least 3 EIs**:
+- `int(user_input)` succeeds, `process()` succeeds
+- `int(user_input)` raises ValueError
+- `int(user_input)` succeeds, `process()` raises exception
+
+##### Integration with Chained Operations
+
+You can see how this pattern would apply to chained operations (Section 2.1.5).
+
+When operations that can raise exceptions appear in a chain, each operation in
+the chain that can raise an exception creates its own EI for the exception path.
+This one-line example shows a chained constructor call followed by a method
+call, and this single statement creates four EIs:
+```python
+result = MyStore(value).get_config()
+```
+
+If the `MyStore(value)` constructor can raise `ValueError` for invalid values,
+enumerate:
+1. `MyStore(value)` raises `ValueError` → chain terminates
+2. `MyStore(value)` succeeds, `get_config()` executes → continues based on
+   `get_config()` outcomes
+3. `get_config()` raises exception → chain terminates
+4. `get_config()` succeeds → EI for successful operation
+
+The exception from the earlier operation in the chain prevents later operations
+from executing, creating a distinct execution path.
+
+### 2.2 Conditional Constructs
+
+#### 2.2.1 If/Else Statements
+##### Source Code
+```python
+if user.is_authenticated:
+    grant_access()
+else:
+    deny_access()
+```
+
+##### Outcome Path Analysis
+```yaml
+outcome_map:
+  10: ["user.is_authenticated true → enters if block",
+       "user.is_authenticated false → enters else block"]
+```
+
+##### EI Assignment
+2 EIs: one for the `true` path, one for the `false` path.
 
 #### 2.2.2 If Without Else
 Creates 2 EIs:

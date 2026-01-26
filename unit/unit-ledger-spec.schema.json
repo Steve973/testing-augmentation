@@ -22,6 +22,10 @@
       "type": "string",
       "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
     },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
     "NonEmptyString": {
       "type": "string",
       "minLength": 1
@@ -50,6 +54,18 @@
     },
     "Language": {
       "$ref": "#/$defs/NonEmptyString"
+    },
+    "CallablesAnalyzed": {
+      "$ref": "#/$defs/NonNegativeInteger"
+    },
+    "TotalExeItems": {
+      "$ref": "#/$defs/NonNegativeInteger"
+    },
+    "InterunitIntegrations": {
+      "$ref": "#/$defs/NonNegativeInteger"
+    },
+    "BoundaryIntegrations": {
+      "$ref": "#/$defs/NonNegativeInteger"
     },
     "Visibility": {
       "type": "string",
@@ -878,13 +894,25 @@
         "unit": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "language"],
+          "required": ["name", "language", "callablesAnalyzed", "totalExeItems", "interunitIntegrations", "boundaryIntegrations"],
           "properties": {
             "name": {
               "$ref": "#/$defs/NonEmptyString"
             },
             "language": {
               "$ref": "#/$defs/Language"
+            },
+            "callablesAnalyzed":  {
+              "$ref": "#/$defs/CallablesAnalyzed"
+            },
+            "totalExeItems": {
+              "$ref": "#/$defs/TotalExeItems"
+            },
+            "interunitIntegrations": {
+              "$ref": "#/$defs/InterunitIntegrations"
+            },
+            "boundaryIntegrations": {
+              "$ref": "#/$defs/BoundaryIntegrations"
             }
           }
         },
