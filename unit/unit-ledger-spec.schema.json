@@ -690,13 +690,10 @@
     "DerivedIdsEiAssignment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "parent", "address", "summary"],
+      "required": ["id", "address", "summary"],
       "properties": {
         "id": {
           "$ref": "#/$defs/EiId"
-        },
-        "parent": {
-          "$ref": "#/$defs/CallableId"
         },
         "address": {
           "$ref": "#/$defs/NonEmptyString"

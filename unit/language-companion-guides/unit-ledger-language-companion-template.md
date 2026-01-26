@@ -25,6 +25,10 @@ Quick reference of what creates EIs in this language:
 - **Null safety:** [if applicable]
 - **Short-circuit evaluation:** [if applicable]
 
+### 1.3 Unit Boundaries
+Provide a definition of, and explain what constitutes, a unit boundary in this
+language and include the rationale for the stated unit boundary distinction.
+
 ## 2. Identifying Execution Items
 
 ### 2.1 Simple Statements (1 EI per line)

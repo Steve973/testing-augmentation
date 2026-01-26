@@ -269,15 +269,15 @@ def fetch_user(user_id: str) -> dict:
 - The final EI in each execution path must be the integration's own EI ID
 - If `executionPaths` is empty, the integration is unreachable (dead code) and
   will be reported in the Review (Document 3)
-- Be sure to enumerate ALL execution paths that can reach the integration point.
-  For N independent conditionals before an integration, generate 2^N paths
-  (Cartesian product of all conditional outcomes).
+- Be sure to enumerate ALL `executionPaths` that can reach the integration
+  point. For N independent conditionals before an integration, generate 2^N
+  paths (Cartesian product of all conditional outcomes).
 - Any code sourced from the unit should be taken verbatim
   - Enclosed in single quotes
-  - Any internal single quotes are doubled (two single quotes, not replaced
-    with a double quote)
+  - Any internal single quotes/apostrophes are escaped according to the YAML
+    rules: In YAML, you escape a single quote (') within a single-quoted string
+    by using two single quotes consecutively ('').  
   - Single lines with line breaks are joined into a single line
-
 
 ### 2.2 Data Structures
 
@@ -310,7 +310,7 @@ descriptions.
 
 **Properties:**
 
-- Line numbers are absolute (from source file)
+- Line numbers are absolute (from the source file)
 - Non-executable lines (comments, blanks) are omitted
 - Empty lists indicate lines with no branching (single outcome)
 - List length at each line = number of EIs for that line
@@ -557,7 +557,20 @@ For each executable line, ask:
    - Stream with filter (Java): 3 outcomes (empty stream, all filtered, some
      pass)
 
-3. **Otherwise:** 1 outcome (line executes)
+3. **Does this line contain operations (e.g., method/function calls, collection
+   comprehensions, python property access with `@property`) as parameters to
+   other operations?**
+   - Each operation in the parameter position creates **at least one EI**. The 
+     exact number depends on analyzing that operation's possible outcomes.
+     - Operations in this unit: enumerate actual outcome paths
+     - Operations that are integration points: apply reasonable analysis (assume 
+       success/failure at a minimum)
+     - Variables or literals as parameters: do not create additional EIs
+     - Each operation that is an **explicitly confirmed** integration point must
+       be captured in Stage 3
+   **See the relevant language guide for detailed guidance and examples.**
+
+4. **Otherwise:** 1 outcome (line executes)
 
 **Output Structure:**
 
@@ -809,7 +822,7 @@ executionPaths:
    - Populate unit metadata
    - Populate assigned.entries list with all callable IDs
    - Populate assigned.branches list with all EI IDs
-   - Each branch entry includes: id, parent (callable ID), address, summary
+   - Each branch entry includes: id, address, summary
    - Any code sourced from the unit should be taken verbatim
      - Enclosed in single quotes
      - Any internal single quotes are doubled (two single quotes, not replaced
@@ -1070,7 +1083,7 @@ assert all_eis_in_paths.issubset(stage2_ei_ids), "Unknown EI in path"
 - [ ] unit.language is non-empty
 - [ ] assigned.entries list contains all callable IDs
 - [ ] assigned.branches list contains all EI IDs
-- [ ] Every branch entry has: id, parent, address, summary
+- [ ] Every branch entry has: id, address, summary
 - [ ] No duplicate entry IDs
 - [ ] No duplicate branch IDs
 
@@ -2126,15 +2139,12 @@ assigned:
       address: 'example::double_if_positive@L1'
   branches:
     - id: C000F001E0001
-      parent: C000F001
       address: 'example::double_if_positive@if x > 0@L2'
       summary: 'x > 0 true → returns x * 2'
     - id: C000F001E0002
-      parent: C000F001
       address: 'example::double_if_positive@if x > 0@L2'
       summary: 'x > 0 false → continues to line 4'
     - id: C000F001E0003
-      parent: C000F001
       address: 'example::double_if_positive@return@L4'
       summary: 'returns x'
 ```

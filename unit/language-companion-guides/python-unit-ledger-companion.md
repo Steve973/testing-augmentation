@@ -31,6 +31,21 @@ Quick reference of what creates EIs in Python:
   conditional)
 - **Walrus operator:** `:=` in conditionals (treated as part of condition)
 
+### 1.3 Unit Boundary
+
+**Unit Definition**: In Python, a unit is widely considered to be a single `.py`
+file. All functions, classes, and methods defined in the same `.py` file are
+considered part of the same unit. Calls between elements within the same `.py`
+file are NOT integration points.
+
+While this can be interpreted differently across different projects and
+different teams, it is the assumption in this guide. For consistency and for
+convention, we recommend that implementations should follow this convention.
+
+Rationale: This aligns with Python's module system, import conventions, and
+typical testing practices where a `test_X.py` file tests all of `X.py` as a
+cohesive unit.
+
 ## 2. Identifying Execution Items
 
 ### 2.1 Simple Statements (1 EI per line)
@@ -68,6 +83,81 @@ Single EI: the call executes.
 
 #### 2.1.3 Return Statements
 Single EI: the return executes.
+
+#### 2.1.4 Nested Operations (Operations as Parameters)
+
+When operations appear as parameters to other operations, each operation
+represents at least one distinct EI.
+
+##### What Counts as an Operation
+- Method/function calls: `func(other_func())`
+- Comprehensions: `process([x for x in items])`
+- Property access with `@property` decorator (if it executes code)
+
+##### What Does NOT Count
+- Variables: `func(my_var)` - only 1 EI
+- Literals: `func(42, "test")` - only 1 EI
+
+##### Source Code
+```python
+# Example: Method call with method call parameter
+normalized = _normalize(self.to_mapping())
+```
+
+##### EI Count
+At least 2 EIs (analyze each operation separately):
+- `self.to_mapping()` executes
+- `_normalize(...)` executes
+
+##### Determining Exact EI Count
+
+**If the operation is in this unit:**
+Analyze it directly using the normal decision process. If `to_mapping()` has 3
+possible outcomes, it creates 3 EIs.
+
+**If the operation is an integration (not in this unit):**
+Apply reasonable analysis:
+- Well-known operations (stdlib): Use documented behavior (e.g., `json.loads()`
+  can raise)
+- Other integrations: Assume minimum success/failure outcomes
+- Document assumptions in findings
+
+##### Outcome Path Analysis
+```yaml
+outcome_map:
+  94: ["self.to_mapping() executes successfully",
+       "_normalize(...) executes with result"]
+```
+
+##### Integration Facts
+If operations are integrations, track them in Stage 3. In this example:
+- `_normalize()` is interunit (function *not* in this module) → integration fact
+- `self.to_mapping()` is in this class → NOT an integration fact
+
+To clarify, **any** operation within the same unit is **not** an integration
+point/fact, so it should never be captured as one. Any operation that crosses
+units (i.e., is physically located in a different `.py` file) is an integration
+point, so it should be captured as one.
+
+##### More Examples
+
+**Multiple nested calls:**
+```python
+result = validate(parse(fetch(url)))
+```
+At least 3 EIs: `fetch()`, then `parse()`, then `validate()`
+
+**Variable as parameter:**
+```python
+result = process(my_variable)
+```
+Only 1 EI - variables don't create additional EIs
+
+**Mixed:**
+```python
+result = outer(inner(), simple_var)
+```
+At least 2 EIs: `inner()` and `outer()` - the variable doesn't add an EI
 
 ### 2.2 Conditional Constructs
 
@@ -389,7 +479,15 @@ Framework dispatch is external to the unit.
 ### 4.1 Implicit Execution
 
 #### Properties (`@property`)
-Treat properties as callables - they execute code when accessed.
+Treat Python properties (`@property` decorated methods) as callables, since they
+execute code when they are invoked or accessed.
+
+**Properties are NOT integration points when accessed on `self` or other 
+instances defined in the same unit.** For example, `self.identifier`, where 
+`identifier` is a `@property` in the same class, creates an EI for the property 
+access, but NOT an integration fact. It is an integration point **only** when
+accessing a property on an object from a different unit (i.e., different `.py`
+file).
 
 #### Magic Methods (`__str__`, `__eq__`, etc.)
 Enumerate like regular methods.
