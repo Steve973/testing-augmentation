@@ -48,8 +48,8 @@ enumeration of execution items.
 
 **This procedure IS:**
 - A systematic method for enumerating all execution items in a unit
-- A specification for capturing integration facts (inter-unit calls, boundary
-  crossings)
+- A specification for capturing integration facts (inter-unit calls, external
+  libraries, and boundary crossings)
 - A foundation for generating comprehensive unit tests
 - A language-agnostic inventory format
 - An inventory of *observed* content
@@ -83,7 +83,8 @@ The procedure consists of five sequential stages, executed per callable:
 
 **Stage 3: Integration Fact Enumeration**
 - Input: Code and EI mappings from Stage 2
-- Process: Identify inter-unit calls and boundary crossings
+- Process: Identify inter-unit calls, external library calls, and boundary
+  crossings
 - Output: Integration facts with executionPaths referencing EI IDs
 - Gate: Verify every integration fact references valid EI IDs
 
@@ -231,7 +232,7 @@ def validate(value: int) -> str:
 **Integration facts** capture how a unit interacts with code outside its
 boundaries. These facts enable integration test planning and flow analysis.
 
-Two categories exist:
+Three categories exist:
 
 **Interunit Integration:**
 
@@ -247,6 +248,22 @@ def validate_config(raw: str) -> bool:
     return config.is_valid()
 ```
 
+**External Library Integration:**
+
+Calls or data exchanges with third-party libraries that are not part of the
+project codebase and do not cross external system boundaries.
+
+Example:
+```python
+import requests
+from lxml import etree
+
+def process_data(url: str) -> dict:
+    response = requests.get(url)  # â† extlib (but also boundary: network)
+    doc = etree.fromstring(response.text)  # â† extlib
+    return parse_doc(doc)
+```
+
 **Boundary Integration:**
 
 Calls or data exchanges that cross external system boundaries (network,
@@ -260,6 +277,40 @@ def fetch_user(user_id: str) -> dict:
     response = requests.get(f"/api/users/{user_id}")  # ← Boundary
     return response.json()
 ```
+
+**Classification During Ledger Generation:**
+
+When identifying an integration point during Stage 3, classify it using this
+decision process:
+
+1. **Load project type inventory**: If a file listing project types is
+   available in project files (typically named `project-inventory.txt` or
+   `PROJECT_TYPES.txt`), load it into memory as a lookup set
+   
+2. **For each integration target**:
+   - If a target matches an entry in the project type inventory → **interunit**
+   - If a target crosses an external system boundary (filesystem, network,
+     database, clock, randomness, env, etc.) → **boundary**
+   - Otherwise → **extlib**
+
+3. **Overlapping cases**: If an external library call also crosses a system
+   boundary (e.g., `requests.get()`), classify as **boundary** since the
+   boundary crossing is the primary concern for integration testing
+
+**Project Type Inventory Format:**
+
+If provided, the project type inventory file contains one fully qualified name
+per line. Inventory of python files might look like:
+```
+project_name.module.ClassName
+project_name.module.ClassName.method_name
+project_name.module.function_name
+```
+
+**If no project type inventory is provided**, use import analysis to infer
+interunit vs. extlib by checking if imports reference modules within the
+project's package namespace. When uncertain about a designation, add a
+note to the summary document (Document 3) describing the uncertainty.
 
 **Critical Integration Fact Properties:**
 
@@ -279,7 +330,295 @@ def fetch_user(user_id: str) -> dict:
     by using two single quotes consecutively ('').  
   - Single lines with line breaks are joined into a single line
 
-### 2.2 Data Structures
+### 2.2 Operation Metadata Decorators
+
+**Purpose**: Operation metadata decorators are comment-based annotations that
+mark code elements with metadata for consumption by downstream processes.
+They act as lightweight markers that can influence code analysis, test
+generation, flow enumeration, and other automated tooling without requiring
+changes to the actual code structure.
+
+**Why This Matters**: As codebases grow and automation becomes more
+sophisticated, different tools need different information about code elements.
+Rather than encoding this information in separate configuration files or
+tool-specific formats, operation metadata decorators provide a standardized,
+human-readable way to annotate code with machine-processable metadata directly
+at the point of definition.
+
+#### Syntax
+
+**Format**:
+```
+<comment> :: <DecoratorName> | type=<value> [ | <field>=<value> ... ]
+```
+
+Where:
+- `<comment>` is the language-specific comment syntax (`#` for Python, `//`
+  for Java/C-family, or within `"""` docstrings / `/** */` Javadoc comments /
+  `/* ... */` c/Java multiline comments)
+- `::` is the decorator marker (space after `::` is required)
+- `<DecoratorName>` is the decorator identifier
+- `type=<value>` is a required field specifying the decorator subtype
+- Additional field-value pairs may follow, separated by `|`
+
+**Standard Fields**:
+
+| Field Name | Required | Description                            |
+|------------|----------|----------------------------------------|
+| `type`     | Yes      | Subclassification within the decorator |
+| `alias`    | No       | Alternate name for the callable        |
+| `desc`     | No       | Human-readable description             |
+
+**Extensibility**: Additional fields may be defined as needed. Tools should
+preserve unknown fields in the `extra` map.
+
+**Format Rules:**
+- Space after `::` is required
+- Case-sensitive decorator and field names
+- Field values may contain spaces (no quotes needed)
+- If field value contains `|`, enclose the entire value in single or double
+  quotes: `desc="Converts to dict | includes metadata"`
+- Multiple field-value pairs separated by `|`
+
+**Location**: Operation metadata decorators may appear in:
+- Single-line comment immediately preceding the callable definition
+- Within the callable's docstring (Python) or Javadoc comment (Java)
+
+If decorators appear in multiple comment locations for the same callable:
+- Identical decorators → Capture once
+- Same decorator with different kwargs → Capture the one with more complete
+  information (more fields)
+- Different decorators → Capture both
+- Duplication → Note in Document 3 findings as a warning
+
+**Examples:**
+
+Python (single-line comment):
+```python
+# :: MechanicalOperation | type=serialization
+def to_mapping(self) -> Mapping[str, Any]:
+    """Convert to dictionary representation."""
+    return {
+        "overrides": self.overrides,
+        "mode": self.mode.value,
+    }
+```
+
+Python (in docstring):
+```python
+def to_mapping(self) -> Mapping[str, Any]:
+    """Convert to dictionary representation.
+    
+    :: MechanicalOperation | type=serialization | alias=ToDict
+    """
+    return {
+        "overrides": self.overrides,
+        "mode": self.mode.value,
+    }
+```
+
+Java (single-line comment):
+```java
+// :: MechanicalOperation | type=serialization
+public Map<String, Object> toMapping() {
+    // Convert to map representation
+    ...
+}
+```
+
+Java (in Javadoc):
+```java
+/**
+ * Convert to map representation.
+ * 
+ * :: UtilityOperation | type=validation | alias=ValidDict
+ * @param desc Human-readable description
+ * @param map  Map to validate
+ */
+public static void validateMap(String desc, Map<String, Object> map) {
+    // Validate map against schema
+    ...
+}
+```
+
+Multiple fields with quoted value:
+```python
+# :: MechanicalOperation | type=serialization | desc="Converts to dict | includes metadata"
+def to_mapping(self) -> Mapping[str, Any]:
+    ...
+```
+
+#### Capturing in Ledgers
+
+**During ledger generation**, operation metadata decorators are captured in
+the `decorators` field of the Entry or CallableSpec using the existing
+Decorator shape.
+
+**Decorator Shape**:
+```yaml
+decorators:
+  - name: <DecoratorName>
+    kwargs:
+      type: <type_value>
+      alias: <alias_value>     # if present
+      desc: <desc_value>       # if present
+      <custom>: <value>        # any additional fields
+```
+
+**Field Mapping**:
+- Decorator name → `name` field
+- All field-value pairs → `kwargs` object
+- Unknown/custom fields → Preserved in `kwargs`
+
+**Example in Document 2 (Ledger)**:
+```yaml
+- id: C001M003
+  kind: callable
+  name: to_mapping
+  signature: 'to_mapping(self) -> Mapping[str, Any]'
+  decorators:
+    - name: MechanicalOperation
+      kwargs:
+        type: serialization
+        alias: ToDict
+  callable:
+    # ... branches, params, etc.
+```
+
+**In Document 3 (Review)**, note decorator usage:
+```yaml
+findings:
+  - severity: info
+    category: assumption
+    message: 'Unit uses 2 operation metadata decorators 
+              (1 MechanicalOperation, 1 UtilityOperation)'
+  - severity: warn
+    category: anomaly
+    message: 'Callable C001M003 has duplicate operation metadata decorators
+              in both docstring and single-line comment'
+```
+
+#### Recognized Operation Metadata Decorators
+
+Operation metadata decorators are organized by category based on their
+intended use by downstream processes.
+
+##### Category 1: Flow Analysis Control
+
+These decorators control how operations are treated during integration flow
+enumeration and traversal. Flow analysis tools use these decorators to
+determine which operations should be traversed during flow enumeration and
+which should be replaced with fixture placeholders.
+
+###### 1.1 Flow Exclusion
+
+Flow exclusion decorators mark operations that should not be traversed during
+integration flow enumeration. When flow analysis encounters a decorated node,
+it emits a fixture placeholder (e.g., `FIXTURE_C000F001`) instead of
+traversing into the operation's integration points. This prevents exponential
+flow explosion from mechanical or utility operations while preserving the
+flow structure for test generation.
+
+**1.1.1 `MechanicalOperation`**
+
+**Decorator Name**: `MechanicalOperation`
+**Purpose**: Identifies mechanical data transformation operations that should
+be replaced with fixtures during flow enumeration
+
+Marks operations that perform deterministic data transformations without
+business logic. These operations are thoroughly tested in unit tests and add
+little value when included in integration test flows.
+
+**Standard type values:**
+- `serialization` - Converts objects to serialized formats
+- `deserialization` - Converts serialized formats to objects
+- `conversion` - Converts between data representations
+- `formatting` - Formats data for display or output
+
+**Typical operations:**
+- **Serialization**: `to_dict()`, `to_mapping()`, `to_json()`, `serialize()`
+- **Deserialization**: `from_dict()`, `from_mapping()`, `parse()`,
+  `deserialize()`
+- **Format conversion**: `to_string()`, `to_xml()`, `to_protobuf()`
+- **Type conversion**: `as_list()`, `as_tuple()`, `cast_to()`
+
+**Characteristics:**
+- Deterministic transformations
+- No business rules or validation
+- No side effects (pure functions preferred)
+- Generally low branching complexity
+
+**Example:**
+```python
+# :: MechanicalOperation | type=serialization | alias=ToDict
+def to_mapping(self) -> Mapping[str, Any]:
+    """Convert to dictionary representation."""
+    return {"id": self.id, "name": self.name}
+```
+
+**1.1.2 `UtilityOperation`**
+
+**Decorator Name**: `UtilityOperation`
+**Purpose**: Identifies cross-cutting utility operations that should be
+replaced with fixtures during flow enumeration
+
+Marks operations that provide infrastructure services used by many features.
+These operations are typically well-tested independently and create flow
+explosion when traversed due to their widespread use.
+
+**Standard type values:**
+- `validation` - Validates data structure or format
+- `logging` - Records events or state
+- `caching` - Stores/retrieves cached data
+- `configuration` - Reads/manages configuration settings
+
+**Typical operations:**
+- **Validation**: `validate_schema()`, `check_format()`, `assert_valid()`
+- **Logging**: `log_event()`, `write_audit()`, `record_metric()`
+- **Caching**: `cache_get()`, `cache_set()`, `memoize()`
+- **Configuration**: `load_config()`, `get_setting()`, `read_env()`
+
+**Characteristics:**
+- Used by many different business flows
+- Often infrastructure/framework code
+- May have conditional logic but not business-specific
+- Often boundary operations (logging, config, cache)
+
+**Example:**
+```python
+# :: UtilityOperation | type=validation | alias=ValidDict
+def validate_typed_dict(desc: str, mapping: dict, ...) -> None:
+    """Validate dict against TypedDict schema."""
+    ...
+```
+
+##### Category 2: Feature Architecture (Reserved)
+
+This category is reserved for future decorators that mark architectural roles
+in feature implementation. Examples might include entry point markers,
+terminal operation markers, or orchestrator identifiers.
+
+#### Downstream Process Behavior
+
+**Flow Analysis and Test Generation**: Operation metadata decorators are
+consumed by downstream flow enumeration and test generation processes. When
+flow analysis encounters an integration node marked with a flow exclusion
+decorator (Category 1), it emits a fixture placeholder (e.g.,
+`FIXTURE_C000F001`) instead of traversing the node's edges. Test generation
+tools then create appropriate mocks or fixtures for these placeholders.
+
+**Detailed flow enumeration behavior**: See the Integration Test Contract
+specification for complete details on how flow analysis consumes decorator
+metadata and generates fixture placeholders.
+
+**Example impact:**
+- Without decorators: `to_mapping()` with 3 execution items creates 3-way
+  branching at every call site, leading to exponential flow explosion
+- With `:: MechanicalOperation | type=serialization`: Flow traversal emits
+  `FIXTURE_C000F001` and skips traversal, treating it as a pass-through
+- Observed reduction: 135MB → 11MB flow output, 18.6 → 6.5 average hops
+
+### 2.3 Data Structures
 
 #### Outcome Map
 
@@ -316,7 +655,7 @@ descriptions.
 - List length at each line = number of EIs for that line
 - Sum of all list lengths = total EI count for the callable
 
-### 2.3 YAML Document Shapes
+### 2.4 YAML Document Shapes
 
 The Unit Ledger consists of three YAML documents. Below are the key shapes used
 in these documents. For complete shape templates and all optional fields, see
@@ -343,7 +682,7 @@ Describes a single execution item.
 **Optional fields:**
 
 - `precondition`: string, required state for this EI to be reachable
-- `notes`: string, clarifications or context
+- `notes`: string, clarifications, or context
 - `test`: `TestGuide`, hints for test generation
 - `extra`: map, extension fields
 - `inferred`: map, derived facts (if enabled)
@@ -359,7 +698,7 @@ Describes a single execution item.
 
 #### IntegrationFact
 
-Describes an integration point (interunit or boundary).
+Describes an integration point (interunit, extlib, or boundary).
 
 **Required fields:**
 
@@ -383,6 +722,8 @@ Describes an integration point (interunit or boundary).
 
 **Example:**
 
+For `interunit`:
+
 ```yaml
 interunit:
   - id: IC003M002E0002
@@ -392,6 +733,19 @@ interunit:
     executionPaths:
       - [C003M002E0002]  # Always called if execution reaches line
     notes: 'Validates overrides dict against TypedDict schema'
+```
+
+For `extlib`:
+
+```yaml
+extlib:
+  - id: IC003M002E0005
+    target: lxml.etree.fromstring
+    kind: call
+    signature: 'etree.fromstring(xml_text)'
+    executionPaths:
+      - [C003M002E0003, C003M002E0005]
+    notes: 'Third-party XML parsing library'
 ```
 
 #### BoundarySummary
@@ -463,9 +817,9 @@ contract:
       notes: 'If raw is malformed JSON'
 ```
 
-### 2.4 Terminology Notes
+### 2.5 Terminology Notes
 
-**"Branch" vs "Execution Item":**
+**"Branch" vs. "Execution Item":**
 
 In the current YAML schema and many existing ledgers, the term "branch" is used
 (BranchSpec, Branch ID, etc.). This specification uses "Execution Item" or "EI"
@@ -688,8 +1042,8 @@ C001M003E0012  ← Class method, 12th EI
 
 ### 3.3 Stage 3: Integration Fact Enumeration
 
-**Purpose:** Identify all integration points (interunit calls and boundary
-crossings) within the callable, linking them to their EI IDs.
+**Purpose:** Identify all integration points (interunit calls, extlib calls, and
+boundary crossings) within the callable, linking them to their EI IDs.
 
 **Input:**
 - Source code for current callable
@@ -939,6 +1293,7 @@ Unit: compatibility.py (Python)
 Callables analyzed: 12
 Total EIs: 203
 Interunit integrations: 8
+Extlib integrationms: 5
 Boundary integrations: 3
 Findings: 2 (see Document 3)
 Validation: PASSED
@@ -2197,6 +2552,7 @@ unit:
   callablesAnalyzed: 7
   totalExeItems: 70
   interunitIntegrations: 6
+  extlibIntegrations: 2
   boundaryIntegrations: 4
 findings:
   - severity: info

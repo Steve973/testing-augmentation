@@ -131,8 +131,14 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[d
                 # Build flow sequence with full node data
                 sequence = []
                 for node_id in path:
-                    if node_id in nodes_by_id:
-                        sequence.append(nodes_by_id[node_id])
+                    node = nodes_by_id.get(node_id)
+                    if node:
+                        # Check if this node should be excluded (fixture)
+                        if node.get('excludeFromFlows'):
+                            fixture_id = node.get('fixtureCallableId', 'UNKNOWN')
+                            sequence.append(f"FIXTURE_{fixture_id}")
+                        else:
+                            sequence.append(node)
 
                 # Determine entry point info
                 entry_node = nodes_by_id.get(entry_id, {})
@@ -153,7 +159,9 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[d
 
                 # Build flow description
                 flow_description = ' → '.join([
-                    nodes_by_id.get(node_id, {}).get('target', 'unknown')
+                    f"FIXTURE_{nodes_by_id.get(node_id, {}).get('fixtureCallableId', 'UNKNOWN')}"
+                    if nodes_by_id.get(node_id, {}).get('excludeFromFlows')
+                    else nodes_by_id.get(node_id, {}).get('target', 'unknown')
                     for node_id in path
                 ])
 
@@ -167,6 +175,61 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[d
                 })
 
                 continue  # Don't explore further from terminal nodes
+
+            # Check if current node should be excluded from flows (mechanical operation)
+            current_node = nodes_by_id.get(current_id, {})
+            if current_node.get('excludeFromFlows'):
+                # Treat this like a terminal node - record flow and stop
+                flow_counter += 1
+                flows_from_this_entry += 1
+                flow_id = f"FLOW_{flow_counter:04d}"
+
+                # Build flow sequence with fixture placeholder
+                sequence = []
+                for node_id in path:
+                    node = nodes_by_id.get(node_id)
+                    if node:
+                        if node.get('excludeFromFlows'):
+                            fixture_id = node.get('fixtureCallableId', 'UNKNOWN')
+                            sequence.append(f"FIXTURE_{fixture_id}")
+                        else:
+                            sequence.append(node)
+
+                # Entry point info
+                entry_node = nodes_by_id.get(entry_id, {})
+                entry_point_info = {
+                    'integrationId': entry_id,
+                    'unitId': entry_node.get('sourceUnit', 'unknown'),
+                    'callableId': entry_node.get('sourceCallableId', 'unknown'),
+                    'callableName': entry_node.get('sourceCallableName', 'unknown'),
+                    'wayIn': f"Call {entry_node.get('sourceCallableName', 'unknown')} to reach first integration point"
+                }
+
+                # Terminal is the excluded node
+                terminal_node_info = {
+                    'integrationId': current_id,
+                    'excludedOperation': current_node.get('fixtureCallableId'),
+                    'reason': 'MechanicalOperation or UtilityOperation'
+                }
+
+                # Build flow description
+                flow_description = ' → '.join([
+                    f"FIXTURE_{nodes_by_id.get(node_id, {}).get('fixtureCallableId', 'UNKNOWN')}"
+                    if nodes_by_id.get(node_id, {}).get('excludeFromFlows')
+                    else nodes_by_id.get(node_id, {}).get('target', 'unknown')
+                    for node_id in path
+                ])
+
+                flows.append({
+                    'flowId': flow_id,
+                    'description': flow_description,
+                    'length': len(path),
+                    'sequence': sequence,
+                    'entryPoint': entry_point_info,
+                    'terminalNode': terminal_node_info
+                })
+
+                continue  # Don't explore further from excluded nodes
 
             # Check depth limit
             if len(path) >= max_depth:

@@ -299,6 +299,18 @@ def validate_outputs() -> bool:
 # Utility Functions
 # ============================================================================
 
+def get_pattern_analysis_max_depth() -> int:
+    return _CONFIG.get('pattern_analysis', {}).get('max_depth', 40)
+
+
+def get_long_flow_threshold() -> int:
+    return _CONFIG.get('pattern_analysis', {}).get('long_flow_threshold', 8)
+
+
+def get_pattern_analysis_output() -> Path:
+    return get_integration_output_dir() / 'stage4-pattern-analysis.yaml'
+
+
 def ensure_output_dir() -> None:
     """Ensure the integration output directory exists."""
     get_integration_output_dir().mkdir(parents=True, exist_ok=True)

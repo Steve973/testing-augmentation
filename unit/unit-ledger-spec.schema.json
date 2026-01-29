@@ -56,16 +56,19 @@
       "$ref": "#/$defs/NonEmptyString"
     },
     "CallablesAnalyzed": {
-      "$ref": "#/$defs/NonNegativeInteger"
+      "$ref": "#/$defs/NonEmptyString"
     },
     "TotalExeItems": {
-      "$ref": "#/$defs/NonNegativeInteger"
+      "$ref": "#/$defs/NonEmptyString"
     },
     "InterunitIntegrations": {
-      "$ref": "#/$defs/NonNegativeInteger"
+      "$ref": "#/$defs/NonEmptyString"
+    },
+    "ExtlibIntegrations": {
+      "$ref": "#/$defs/NonEmptyString"
     },
     "BoundaryIntegrations": {
-      "$ref": "#/$defs/NonNegativeInteger"
+      "$ref": "#/$defs/NonEmptyString"
     },
     "Visibility": {
       "type": "string",
@@ -459,6 +462,13 @@
       "additionalProperties": false,
       "properties": {
         "interunit": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/IntegrationFact"
+          }
+        },
+        "extlib": {
           "type": "array",
           "minItems": 1,
           "items": {
@@ -894,7 +904,7 @@
         "unit": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "language", "callablesAnalyzed", "totalExeItems", "interunitIntegrations", "boundaryIntegrations"],
+          "required": ["name", "language", "callablesAnalyzed", "totalExeItems", "interunitIntegrations", "extlibIntegrations", "boundaryIntegrations"],
           "properties": {
             "name": {
               "$ref": "#/$defs/NonEmptyString"
@@ -910,6 +920,9 @@
             },
             "interunitIntegrations": {
               "$ref": "#/$defs/InterunitIntegrations"
+            },
+            "extlibIntegrations": {
+              "$ref": "#/$defs/ExtlibIntegrations"
             },
             "boundaryIntegrations": {
               "$ref": "#/$defs/BoundaryIntegrations"

@@ -36,6 +36,13 @@ max_window_length = 7
 # Treat boundary integrations as terminal nodes
 boundaries_are_terminal = true
 
+[pattern_analysis]
+# Maximum depth for pattern analysis traversal
+max_depth = 15
+
+# Flows at or above this threshold are considered "long" and analyzed
+long_flow_threshold = 8
+
 [output_format]
 # YAML formatting options
 yaml_width = 100
