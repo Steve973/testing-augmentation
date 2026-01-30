@@ -20,8 +20,9 @@ namespace_anchor = ""
 stage1_output = "stage1-integration-points.yaml"
 stage2_output = "stage2-classified-points.yaml"
 stage3_output = "stage3-integration-graph.yaml"
-stage4_output = "stage4-flows.yaml"
-stage5_output = "stage5-windows.yaml"
+stage4_output = "stage4-pattern-analysis.yaml"
+stage5_output = "stage5-flows.yaml"
+stage6_output = "stage6-windows.yaml"
 
 [processing]
 # Maximum depth when traversing flows (prevents infinite loops)

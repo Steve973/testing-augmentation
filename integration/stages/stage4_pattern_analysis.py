@@ -23,19 +23,29 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Any
-from collections import defaultdict, Counter
+from collections import Counter
+
+from integration import config
 
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import config
-from shared.yaml_utils import yaml_load, yaml_dump
+from ..shared.yaml_utils import yaml_load, yaml_dump
+from ..shared.data_structures import (
+    CallableReference,
+    CyclePattern,
+    GraphNode,
+    load_graph_nodes,
+    PatternAnalysisResult,
+    PatternAnalysisSummary,
+    SubsequencePattern
+)
 
 
 def analyze_patterns(
         graph_data: dict[str, Any],
         verbose: bool = False
-) -> dict[str, Any]:
+) -> PatternAnalysisResult:
     """
     Analyze flow patterns to identify explosion causes.
 
@@ -51,24 +61,30 @@ def analyze_patterns(
     Returns:
         Analysis results dict
     """
-    nodes = graph_data.get('nodes', [])
+    # Load nodes as GraphNode objects
+    nodes_list = load_graph_nodes(graph_data)
     edges = graph_data.get('edges', [])
     classification = graph_data.get('classification', {})
 
     entry_points = set(classification.get('entryPoints', []))
     terminal_nodes = set(classification.get('terminalNodes', []))
 
-    if not nodes or not entry_points:
-        return {
-            'subsequences': [],
-            'cycles': [],
-            'flowLengthDistribution': {},
-            'summary': {
-                'totalFlowsAnalyzed': 0,
-                'longFlows': 0,
-                'cyclesDetected': 0
-            }
-        }
+    if not nodes_list or not entry_points:
+        return PatternAnalysisResult(
+            subsequences=[],
+            cycles=[],
+            flow_length_distribution={},
+            summary=PatternAnalysisSummary(
+                total_flows_analyzed=0,
+                long_flows=0,
+                long_flow_threshold=0,
+                unique_subsequences=0,
+                cycles_detected=0,
+                average_flow_length=0.0,
+                max_flow_length=0,
+                min_flow_length=0
+            )
+        )
 
     # Build adjacency list
     adjacency: dict[str, list[str]] = {}
@@ -80,12 +96,12 @@ def analyze_patterns(
                 adjacency[from_id] = []
             adjacency[from_id].append(to_id)
 
-    # Build node lookup
-    nodes_by_id = {node['id']: node for node in nodes}
+    # Build node lookup with GraphNode objects
+    nodes_by_id: dict[str, GraphNode] = {node.id: node for node in nodes_list}
 
     # Pattern storage
     subsequence_counts: Counter = Counter()
-    cycle_patterns: list[dict[str, Any]] = []
+    cycle_patterns: list[CyclePattern] = []
     flow_lengths: list[int] = []
 
     max_depth = config.get_pattern_analysis_max_depth()
@@ -143,8 +159,8 @@ def analyze_patterns(
                 continue
 
             # Check if current node should be excluded from flows (decorated operation)
-            current_node = nodes_by_id.get(current_id, {})
-            if current_node.get('excludeFromFlows'):
+            current_node = nodes_by_id.get(current_id)
+            if current_node and current_node.exclude_from_flows:
                 # Treat as terminal - don't traverse into decorated operations
                 flows_analyzed += 1
                 flow_length = len(path)
@@ -319,8 +335,8 @@ def is_repeating_cycle(
 
 
 def cycle_already_recorded(
-        cycle_info: dict[str, Any],
-        recorded_cycles: list[dict[str, Any]]
+        cycle_info: CyclePattern,
+        recorded_cycles: list[CyclePattern]
 ) -> bool:
     """
     Check if this cycle pattern was already recorded.
@@ -332,13 +348,13 @@ def cycle_already_recorded(
     Returns:
         True if cycle already recorded
     """
-    new_pattern = tuple(cycle_info['pattern'])
+    new_pattern = tuple(cycle_info.pattern)
 
     for recorded in recorded_cycles:
-        recorded_pattern = tuple(recorded['pattern'])
+        recorded_pattern = tuple(recorded.pattern)
         if new_pattern == recorded_pattern:
             # Same cycle, increment occurrence count
-            recorded['occurrences'] += 1
+            recorded.occurrences += 1
             return True
 
     return False
@@ -346,117 +362,119 @@ def cycle_already_recorded(
 
 def build_cycle_info(
         cycle_path: list[str],
-        nodes_by_id: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
+        nodes_by_id: dict[str, GraphNode]
+) -> CyclePattern:
     """
     Build detailed cycle information.
 
     Args:
         cycle_path: List of integration IDs forming the cycle
-        nodes_by_id: Node lookup dict
+        nodes_by_id: Node lookup dict with GraphNode objects
 
     Returns:
-        Cycle info dict
+        CyclePattern object
     """
-    callables = []
+    callables: list[CallableReference] = []
 
     for node_id in cycle_path:
-        node = nodes_by_id.get(node_id, {})
-        target_resolved = node.get('targetResolved', {})
+        node = nodes_by_id.get(node_id)
+        if not node:
+            continue
 
-        unit_name = target_resolved.get('unitName') or node.get('sourceUnit', 'unknown')
-        callable_name = target_resolved.get('callableName') or node.get('target', 'unknown')
+        target_resolved = node.target_resolved
+        unit_name = target_resolved.unit_name or node.source_unit or 'unknown'
+        callable_name = target_resolved.callable_name or node.target or 'unknown'
 
-        callables.append({
-            'integrationId': node_id,
-            'unitName': unit_name,
-            'callableName': callable_name,
-            'fullyQualified': f"{unit_name}::{callable_name}"
-        })
+        callables.append(CallableReference(
+            integration_id=node_id,
+            unit_name=unit_name,
+            callable_name=callable_name,
+            fully_qualified=f"{unit_name}::{callable_name}"
+        ))
 
-    return {
-        'pattern': cycle_path,
-        'length': len(cycle_path),
-        'occurrences': 1,
-        'callables': callables
-    }
+    return CyclePattern(
+        pattern=cycle_path,
+        length=len(cycle_path),
+        occurrences=1,
+        callables=callables
+    )
 
 
 def build_analysis_results(
         subsequence_counts: Counter,
-        cycle_patterns: list[dict[str, Any]],
+        cycle_patterns: list[CyclePattern],
         flow_lengths: list[int],
-        nodes_by_id: dict[str, dict[str, Any]],
+        nodes_by_id: dict[str, GraphNode],
         flows_analyzed: int,
         long_flows_count: int,
         long_flow_threshold: int
-) -> dict[str, Any]:
+) -> PatternAnalysisResult:
     """
     Build final analysis results structure.
 
     Args:
         subsequence_counts: Counter of subsequence frequencies
-        cycle_patterns: List of detected cycles
+        cycle_patterns: List of detected CyclePattern objects
         flow_lengths: List of all flow lengths
-        nodes_by_id: Node lookup dict
+        nodes_by_id: Node lookup dict with GraphNode objects
         flows_analyzed: Total flows analyzed
         long_flows_count: Number of long flows
-        long_flow_threshold: Definition of "long flow"
+        long_flow_threshold: Minimum length for "long" flow
 
     Returns:
-        Complete analysis results
+        PatternAnalysisResult object
     """
     # Build length distribution
     length_distribution = Counter(flow_lengths)
 
-    # Convert subsequences to list, sorted by count descending
-    subsequences = []
+    # Convert subsequences to SubsequencePattern objects
+    subsequences: list[SubsequencePattern] = []
     for subseq, count in subsequence_counts.most_common():
-        # Map integration IDs to callables
-        callables = []
+        # Map integration IDs to CallableReference objects
+        callables: list[CallableReference] = []
         for node_id in subseq:
-            node = nodes_by_id.get(node_id, {})
-            target_resolved = node.get('targetResolved', {})
+            node = nodes_by_id.get(node_id)
+            if not node:
+                continue
 
-            unit_name = target_resolved.get('unitName') or node.get('sourceUnit', 'unknown')
-            callable_name = target_resolved.get('callableName') or node.get('target', 'unknown')
+            target_resolved = node.target_resolved
+            unit_name = target_resolved.unit_name or node.source_unit or 'unknown'
+            callable_name = target_resolved.callable_name or node.target or 'unknown'
 
-            callables.append({
-                'integrationId': node_id,
-                'unitName': unit_name,
-                'callableName': callable_name,
-                'fullyQualified': f"{unit_name}::{callable_name}"
-            })
+            callables.append(CallableReference(
+                integration_id=node_id,
+                unit_name=unit_name,
+                callable_name=callable_name,
+                fully_qualified=f"{unit_name}::{callable_name}"
+            ))
 
-        subsequences.append({
-            'pattern': list(subseq),
-            'length': len(subseq),
-            'occurrences': count,
-            'callables': callables
-        })
+        subsequences.append(SubsequencePattern(
+            pattern=list(subseq),
+            length=len(subseq),
+            occurrences=count,
+            callables=callables
+        ))
 
     # Sort cycles by occurrence count (descending)
-    sorted_cycles = sorted(
-        cycle_patterns,
-        key=lambda c: c['occurrences'],
-        reverse=True
+    sorted_cycles = sorted(cycle_patterns, key=lambda c: c.occurrences, reverse=True)
+
+    summary = PatternAnalysisSummary(
+        total_flows_analyzed=flows_analyzed,
+        long_flows=long_flows_count,
+        long_flow_threshold=long_flow_threshold,
+        unique_subsequences=len(subsequences),
+        cycles_detected=len(sorted_cycles),
+        average_flow_length=sum(flow_lengths) / len(flow_lengths) if flow_lengths else 0,
+        max_flow_length=max(flow_lengths) if flow_lengths else 0,
+        min_flow_length=min(flow_lengths) if flow_lengths else 0
     )
 
-    return {
-        'subsequences': subsequences,
-        'cycles': sorted_cycles,
-        'flowLengthDistribution': dict(length_distribution),
-        'summary': {
-            'totalFlowsAnalyzed': flows_analyzed,
-            'longFlows': long_flows_count,
-            'longFlowThreshold': long_flow_threshold,
-            'uniqueSubsequences': len(subsequences),
-            'cyclesDetected': len(sorted_cycles),
-            'averageFlowLength': sum(flow_lengths) / len(flow_lengths) if flow_lengths else 0,
-            'maxFlowLength': max(flow_lengths) if flow_lengths else 0,
-            'minFlowLength': min(flow_lengths) if flow_lengths else 0
-        }
-    }
+    return PatternAnalysisResult(
+        subsequences=subsequences,
+        cycles=sorted_cycles,
+        flow_length_distribution=dict(length_distribution),
+        summary=summary
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -533,32 +551,32 @@ def main(argv: list[str] | None = None) -> int:
     args.output.write_text(yaml_dump(output_data), encoding='utf-8')
 
     # Summary
-    summary = analysis_results['summary']
+    summary = analysis_results.summary
     print(f"\n✓ Pattern analysis complete → {args.output}")
-    print(f"  Flows analyzed: {summary['totalFlowsAnalyzed']}")
-    print(f"  Long flows (≥{summary['longFlowThreshold']}): {summary['longFlows']}")
-    print(f"  Unique subsequences: {summary['uniqueSubsequences']}")
-    print(f"  Cycles detected: {summary['cyclesDetected']}")
+    print(f"  Flows analyzed: {summary.total_flows_analyzed}")
+    print(f"  Long flows (≥{summary.long_flow_threshold}): {summary.long_flows}")
+    print(f"  Unique subsequences: {summary.unique_subsequences}")
+    print(f"  Cycles detected: {summary.cycles_detected}")
 
-    if summary['averageFlowLength'] > 0:
-        print(f"  Avg flow length: {summary['averageFlowLength']:.1f} hops")
-        print(f"  Flow length range: {summary['minFlowLength']}-{summary['maxFlowLength']}")
+    if summary.average_flow_length > 0:
+        print(f"  Avg flow length: {summary.average_flow_length:.1f} hops")
+        print(f"  Flow length range: {summary.min_flow_length}-{summary.max_flow_length}")
 
     # Show top patterns if any
-    if analysis_results['subsequences']:
+    if analysis_results.subsequences:
         print(f"\n  Top 5 most common subsequences:")
-        for i, subseq in enumerate(analysis_results['subsequences'][:5], 1):
-            chain = ' → '.join([c['callableName'] for c in subseq['callables']])
-            print(f"    {i}. [{subseq['length']} hops, {subseq['occurrences']}x]: {chain}")
+        for i, subseq in enumerate(analysis_results.subsequences[:5], 1):
+            chain = ' → '.join([c.callable_name for c in subseq.callables])
+            print(f"    {i}. [{subseq.length} hops, {subseq.occurrences}x]: {chain}")
 
     # Show cycles if any
-    if analysis_results['cycles']:
+    if analysis_results.cycles:
         print(f"\n  Detected cycles:")
-        for i, cycle in enumerate(analysis_results['cycles'][:5], 1):
-            chain = ' → '.join([c['callableName'] for c in cycle['callables']])
-            print(f"    {i}. [{cycle['length']} hops, {cycle['occurrences']}x]: {chain}")
+        for i, cycle in enumerate(analysis_results.cycles[:5], 1):
+            chain = ' → '.join([c.callable_name for c in cycle.callables])
+            print(f"    {i}. [{cycle.length} hops, {cycle.occurrences}x]: {chain}")
 
-    if not analysis_results['subsequences'] and not analysis_results['cycles']:
+    if not analysis_results.subsequences and not analysis_results.cycles:
         print("\n  NOTE: No problematic patterns detected.")
         print("  All flows are within acceptable length.")
 

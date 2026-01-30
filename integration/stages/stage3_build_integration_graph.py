@@ -21,14 +21,17 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import config
-from shared.yaml_utils import yaml_load, yaml_dump
-from shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc
+from integration import config
+from ..shared.yaml_utils import yaml_load, yaml_dump
+from ..shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc
+from ..shared.data_structures import (
+    IntegrationPoint, GraphNode, IntegrationEdge, IntegrationGraph,
+    IntegrationPointClassification, load_integration_points, load_classification, CallableIndexEntry, TargetResolution
+)
 
 
 def check_for_exclusion_decorator(callable_id: str, unit_name: str, ledger_paths: list[Path]) -> tuple[
@@ -80,12 +83,12 @@ def check_for_exclusion_decorator(callable_id: str, unit_name: str, ledger_paths
             for decorator in decorators:
                 decorator_name = decorator.get('name', '')
                 if decorator_name in ['MechanicalOperation', 'UtilityOperation']:
-                    return (True, decorator_name)
+                    return True, decorator_name
 
-    return (False, None)
+    return False, None
 
 
-def build_callable_index(ledger_paths: list[Path], verbose: bool = False) -> dict[str, list[dict[str, Any]]]:
+def build_callable_index(ledger_paths: list[Path], verbose: bool = False) -> dict[str, list[CallableIndexEntry]]:
     """
     Build an index of all callables from ledgers for target resolution.
 
@@ -135,26 +138,30 @@ def build_callable_index(ledger_paths: list[Path], verbose: bool = False) -> dic
             # If this is a callable or class, add to index
             # Classes are indexed to support constructor call resolution
             if entry_kind in ['callable', 'class'] and entry_id:
-                # Index by simple name
+                # Index by the simple name
                 if entry_name not in index:
                     index[entry_name] = []
-                index[entry_name].append({
-                    'unit': unit_name,
-                    'callableId': entry_id,
-                    'qualifiedName': qualified,
-                    'fullQualified': f"{unit_name}::{qualified}"
-                })
+                index[entry_name].append(
+                    CallableIndexEntry(
+                        unit=unit_name,
+                        callable_id=entry_id,
+                        qualified_name=qualified,
+                        fully_qualified=f"{unit_name}::{qualified}"
+                    )
+                )
 
                 # Also index by qualified name if different
                 if qualified != entry_name:
                     if qualified not in index:
                         index[qualified] = []
-                    index[qualified].append({
-                        'unit': unit_name,
-                        'callableId': entry_id,
-                        'qualifiedName': qualified,
-                        'fullQualified': f"{unit_name}::{qualified}"
-                    })
+                    index[qualified].append(
+                        CallableIndexEntry(
+                            unit=unit_name,
+                            callable_id=entry_id,
+                            qualified_name=qualified,
+                            fully_qualified=f"{unit_name}::{qualified}"
+                        )
+                    )
 
             # Track class context for children
             new_parent = qualified if entry_kind == 'class' else parent_class
@@ -173,7 +180,7 @@ def build_callable_index(ledger_paths: list[Path], verbose: bool = False) -> dic
     return index
 
 
-def resolve_target(target: str, callable_index: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def resolve_target(target: str, callable_index: dict[str, list[CallableIndexEntry]]) -> TargetResolution:
     """
     Resolve a target string to unit/callable information.
 
@@ -185,15 +192,15 @@ def resolve_target(target: str, callable_index: dict[str, list[dict[str, Any]]])
         Resolution dict with status, unitId, callableId, name, qualifiedName
     """
     if not target or target not in callable_index:
-        return {
-            'status': 'unresolved',
-            'unitId': None,
-            'unitName': None,
-            'callableId': None,
-            'name': None,
-            'qualifiedName': None,
-            'callableName': None
-        }
+        return TargetResolution(
+            status='unresolved',
+            unit_id=None,
+            unit_name=None,
+            callable_id=None,
+            name=None,
+            qualified_name=None,
+            callable_name=None
+        )
 
     # Get matches
     matches = callable_index[target]
@@ -201,35 +208,35 @@ def resolve_target(target: str, callable_index: dict[str, list[dict[str, Any]]])
     if len(matches) == 1:
         # Unique match
         match = matches[0]
-        return {
-            'status': 'resolved',
-            'unitId': match['unit'],
-            'unitName': match['unit'],
-            'callableId': match['callableId'],
-            'name': target,
-            'qualifiedName': match['qualifiedName'],
-            'callableName': target.split('.')[-1]  # Last part of name
-        }
+        return TargetResolution(
+            status='resolved',
+            unit_id=match.unit,
+            unit_name=match.qualified_name,
+            callable_id=match.callable_id,
+            name=target,
+            qualified_name=match.qualified_name,
+            callable_name=target.split('.')[-1]
+        )
     else:
         # Multiple matches - ambiguous
-        return {
-            'status': 'ambiguous',
-            'unitId': None,
-            'unitName': None,
-            'callableId': None,
-            'name': target,
-            'qualifiedName': None,
-            'callableName': None,
-            'matches': [m['fullQualified'] for m in matches]
-        }
+        return TargetResolution(
+            status='ambiguous',
+            unit_id=None,
+            unit_name=None,
+            callable_id=None,
+            name=target,
+            qualified_name=None,
+            callable_name=None,
+            matches=[m.fully_qualified for m in matches]
+        )
 
 
 def build_integration_graph(
-        points_data: dict[str, Any],
-        classification_data: dict[str, Any],
+        points: list[IntegrationPoint],
+        classification: IntegrationPointClassification,
         ledger_paths: list[Path],
         verbose: bool = False
-) -> dict[str, Any]:
+) -> IntegrationGraph:
     """
     Build graph with edges between integration points.
 
@@ -238,50 +245,42 @@ def build_integration_graph(
         I1.target resolves to the callable that contains I2
 
     Args:
-        points_data: Integration points from Stage 1
-        classification_data: Classification from Stage 2
+        points: Integration points from Stage 1
+        classification: Classification from Stage 2
         ledger_paths: Paths to ledger files for resolution
         verbose: Print progress information
 
     Returns:
-        Graph dict with nodes and edges
+        IntegrationGraph object
     """
-    points = points_data.get('integrationPoints', [])
-
     if not points:
-        return {
-            'stage': 'integration-graph',
-            'nodes': [],
-            'edges': [],
-            'metadata': {
-                'nodeCount': 0,
-                'edgeCount': 0
-            }
-        }
+        return IntegrationGraph(
+            nodes=[],
+            edges=[],
+            classification=classification
+        )
 
     # Build callable index for target resolution
     callable_index = build_callable_index(ledger_paths, verbose=verbose)
 
-    # Resolve all targets and update nodes
-    resolved_points = []
-    resolution_stats = {'resolved': 0, 'unresolved': 0, 'ambiguous': 0}
+    # Resolve all targets and create GraphNode objects
+    graph_nodes: list[GraphNode] = []
+    resolution_stats = {'resolved': 0, 'unresolved': 0, 'ambiguous': 0, 'excluded': 0}
 
     if verbose:
         print(f"  Resolving {len(points)} integration point targets...")
 
     for point in points:
-        target = point.get('target', '')
-
         # Resolve the target
-        resolution = resolve_target(target, callable_index)
-
-        # Update point with resolution
-        point['targetResolved'] = resolution
+        resolution = resolve_target(point.target_raw, callable_index)
 
         # Check if target callable should be excluded from flows
-        if resolution.get('status') == 'resolved':
-            target_callable_id = resolution.get('callableId')
-            target_unit_name = resolution.get('unitName')
+        should_exclude = False
+        fixture_callable_id = None
+
+        if resolution.status == 'resolved':
+            target_callable_id = resolution.callable_id
+            target_unit_name = resolution.unit_name
             if target_callable_id and target_unit_name:
                 should_exclude, decorator_type = check_for_exclusion_decorator(
                     target_callable_id,
@@ -289,18 +288,34 @@ def build_integration_graph(
                     ledger_paths
                 )
                 if should_exclude:
-                    point['excludeFromFlows'] = True
-                    point['fixtureCallableId'] = target_callable_id
-                    if verbose and resolution_stats.get('excluded', 0) < 5:  # Show first 5
+                    fixture_callable_id = target_callable_id
+                    if verbose and resolution_stats['excluded'] < 5:  # Show first 5
                         print(
-                            f"    Marking {target_unit_name}::{target_callable_id} ({point.get('target')}) for exclusion ({decorator_type})")
-                    resolution_stats['excluded'] = resolution_stats.get('excluded', 0) + 1
+                            f"    Marking {target_unit_name}::{target_callable_id} ({point.target_raw}) for exclusion ({decorator_type})")
+                    resolution_stats['excluded'] += 1
 
-        # Track stats
-        status = resolution.get('status', 'unresolved')
+        # Track resolution stats
+        status = resolution.status or 'unresolved'
         resolution_stats[status] = resolution_stats.get(status, 0) + 1
 
-        resolved_points.append(point)
+        # Create GraphNode
+        node = GraphNode(
+            id=point.id,
+            source_unit=point.source_unit,
+            source_callable_id=point.source_callable_id,
+            source_callable_name=point.source_callable_name,
+            target=point.target_raw,
+            target_resolved=resolution,
+            kind=point.kind,
+            execution_paths=point.execution_paths,
+            condition=point.condition,
+            boundary=point.boundary if point.boundary else None,
+            signature=point.signature,
+            notes=point.notes,
+            exclude_from_flows=should_exclude,
+            fixture_callable_id=fixture_callable_id
+        )
+        graph_nodes.append(node)
 
     if verbose:
         print(f"    Resolved: {resolution_stats.get('resolved', 0)}")
@@ -308,34 +323,30 @@ def build_integration_graph(
         print(f"    Ambiguous: {resolution_stats.get('ambiguous', 0)}")
 
     # Build lookup: (source_unit, source_callable_id) -> list of integration IDs
-    # Key must include unit to avoid conflating same callable IDs across different units
-    integrations_by_source_callable = {}
-    for point in resolved_points:
-        source_unit = point.get('sourceUnit')
-        source_callable = point.get('sourceCallableId')
-        if source_unit and source_callable:
-            key = (source_unit, source_callable)
+    integrations_by_source_callable: dict[tuple[str, str], list[str]] = {}
+    for node in graph_nodes:
+        if node.source_unit and node.source_callable_id:
+            key = (node.source_unit, node.source_callable_id)
             if key not in integrations_by_source_callable:
                 integrations_by_source_callable[key] = []
-            integrations_by_source_callable[key].append(point['id'])
+            integrations_by_source_callable[key].append(node.id)
 
     # Build edges using resolved targets
-    edges = []
+    edges: list[IntegrationEdge] = []
 
     if verbose:
         print(f"  Building edges...")
 
-    for point in resolved_points:
-        point_id = point['id']
-        resolution = point.get('targetResolved', {})
+    for node in graph_nodes:
+        resolution = node.target_resolved
 
         # Skip if not resolved
-        if resolution.get('status') != 'resolved':
+        if resolution.status != 'resolved':
             continue
 
         # Get the resolved target unit and callable ID
-        target_unit = resolution.get('unitName')
-        target_callable_id = resolution.get('callableId')
+        target_unit = resolution.unit_name
+        target_callable_id = resolution.callable_id
 
         if not target_unit or not target_callable_id:
             continue
@@ -345,38 +356,21 @@ def build_integration_graph(
         target_integrations = integrations_by_source_callable.get(key, [])
 
         for target_integration_id in target_integrations:
-            edges.append({
-                'from': point_id,
-                'to': target_integration_id,
-                'reason': f'{point_id} calls {point.get("target")}, which contains {target_integration_id}'
-            })
+            edge = IntegrationEdge(
+                from_id=node.id,
+                to_id=target_integration_id,
+                reason=f'{node.id} calls {node.target}, which contains {target_integration_id}'
+            )
+            edges.append(edge)
 
     if verbose:
-        print(f"  Built {len(edges)} edges between {len(resolved_points)} nodes")
+        print(f"  Built {len(edges)} edges between {len(graph_nodes)} nodes")
 
-    # Build output
-    result = {
-        'stage': 'integration-graph',
-        'nodes': resolved_points,
-        'edges': edges,
-        'classification': {
-            'entryPoints': classification_data.get('entryPoints', []),
-            'intermediateSeams': classification_data.get('intermediateSeams', []),
-            'terminalNodes': classification_data.get('terminalNodes', [])
-        }
-    }
-
-    if config.include_metadata():
-        result['metadata'] = {
-            'nodeCount': len(resolved_points),
-            'edgeCount': len(edges),
-            'entryPointCount': len(classification_data.get('entryPoints', [])),
-            'intermediateCount': len(classification_data.get('intermediateSeams', [])),
-            'terminalNodeCount': len(classification_data.get('terminalNodes', [])),
-            'resolutionStats': resolution_stats
-        }
-
-    return result
+    return IntegrationGraph(
+        nodes=graph_nodes,
+        edges=edges,
+        classification=classification
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -460,22 +454,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         print(f"Loading integration points from: {args.points}")
     points_data = yaml_load(args.points)
+    points = load_integration_points(points_data)
 
     if args.verbose:
         print(f"Loading classification from: {args.classification}")
     classification_data = yaml_load(args.classification)
+    classification = load_classification(classification_data)
 
-    total_points = len(points_data.get('integrationPoints', []))
     if args.verbose:
-        print(f"Loaded {total_points} integration points")
+        print(f"Loaded {len(points)} integration points")
 
     # Build graph
     if args.verbose:
         print("\nBuilding integration graph...")
 
     graph = build_integration_graph(
-        points_data,
-        classification_data,
+        points,
+        classification,
         ledger_paths,
         verbose=args.verbose
     )
@@ -484,17 +479,14 @@ def main(argv: list[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     # Write output
-    args.output.write_text(yaml_dump(graph), encoding='utf-8')
+    args.output.write_text(yaml_dump(graph.to_dict()), encoding='utf-8')
 
     # Summary
-    node_count = len(graph.get('nodes', []))
-    edge_count = len(graph.get('edges', []))
-
     print(f"\n✓ Graph construction complete → {args.output}")
-    print(f"  Nodes: {node_count}")
-    print(f"  Edges: {edge_count}")
+    print(f"  Nodes: {len(graph.nodes)}")
+    print(f"  Edges: {len(graph.edges)}")
 
-    if edge_count == 0:
+    if len(graph.edges) == 0:
         print("\n  NOTE: No edges found. This means no integration points lead to others.")
         print("  This could indicate:")
         print("    - All integration points are to external/stdlib code")

@@ -18,15 +18,14 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import config
-from shared.data_structures import IntegrationPoint, TargetRef, BoundarySummary
-from shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc, extract_integration_facts
-from shared.yaml_utils import yaml_dump
+from integration import config
+from ..shared.data_structures import IntegrationPoint, TargetRef, BoundarySummary, IntegrationPointCollection
+from ..shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc, extract_integration_facts
+from ..shared.yaml_utils import yaml_dump
 
 
 def create_integration_point(fact: dict) -> IntegrationPoint:
@@ -238,24 +237,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Interunit: {interunit_count}")
         print(f"  Boundaries: {boundary_count}")
 
-    # Build output data
-    output_data: dict[str, Any] = {
-        'stage': 'integration-points-collection',
-        'integrationPoints': [point.to_dict() for point in points]
-    }
-
-    if config.include_metadata():
-        output_data['metadata'] = {
-            'ledgerCount': len(ledger_paths),
-            'integrationPointCount': len(points),
-            'interunitCount': sum(1 for p in points if p.boundary is None),
-            'boundaryCount': sum(1 for p in points if p.boundary is not None),
-            'ledgersRoot': str(args.ledgers_root) if not args.ledgers else None,
-            'explicitLedgers': [str(p) for p in args.ledgers] if args.ledgers else None,
-        }
+    # Build output collection
+    collection = IntegrationPointCollection(
+        points=points,
+        ledger_count=len(ledger_paths) if config.include_metadata() else None,
+        ledgers_root=str(args.ledgers_root) if config.include_metadata() and not args.ledgers else None,
+        explicit_ledgers=[str(p) for p in args.ledgers] if config.include_metadata() and args.ledgers else None
+    )
 
     # Write output
-    args.output.write_text(yaml_dump(output_data), encoding='utf-8')
+    args.output.write_text(yaml_dump(collection.to_dict()), encoding='utf-8')
     print(f"\n✓ Collected {len(points)} integration points → {args.output}")
 
     return 0

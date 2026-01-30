@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 4: Enumerate Flows
+Stage 5: Enumerate Flows
 
 Input: Integration graph from Stage 3
 Output: All complete flows from entry points to terminal nodes
@@ -13,7 +13,7 @@ This stage performs graph traversal to find all complete flows:
 
 DEFAULT BEHAVIOR (no args):
   - Reads from ./integration-output/stage3-integration-graph.yaml
-  - Outputs to ./integration-output/stage4-flows.yaml
+  - Outputs to ./integration-output/stage5-flows.yaml
 """
 
 from __future__ import annotations
@@ -26,11 +26,15 @@ from typing import Any
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import config
-from shared.yaml_utils import yaml_load, yaml_dump
+from integration import config
+from ..shared.yaml_utils import yaml_load, yaml_dump
+from ..shared.data_structures import (
+    GraphNode, Flow, EntryPointInfo, TerminalNodeInfo,
+    load_graph_nodes
+)
 
 
-def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
+def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[Flow]:
     """
     Enumerate all complete flows through the integration graph.
 
@@ -42,16 +46,16 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[d
         verbose: Print progress information
 
     Returns:
-        List of Flow dicts
+        List of Flow objects
     """
-    nodes = graph_data.get('nodes', [])
+    nodes_list = load_graph_nodes(graph_data)
     edges = graph_data.get('edges', [])
     classification = graph_data.get('classification', {})
 
     entry_points = set(classification.get('entryPoints', []))
     terminal_nodes = set(classification.get('terminalNodes', []))
 
-    if not nodes or not entry_points:
+    if not nodes_list or not entry_points:
         return []
 
     # Build adjacency list for fast edge lookup
@@ -64,10 +68,10 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[d
                 adjacency[from_id] = []
             adjacency[from_id].append(to_id)
 
-    # Build node lookup
-    nodes_by_id = {node['id']: node for node in nodes}
+    # Build node lookup with GraphNode objects
+    nodes_by_id: dict[str, GraphNode] = {node.id: node for node in nodes_list}
 
-    flows = []
+    flows: list[Flow] = []
     flow_counter = 0
     max_depth = config.get_max_flow_depth()
     depth_warnings = 0
@@ -128,106 +132,125 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[d
                 flows_from_this_entry += 1
                 flow_id = f"FLOW_{flow_counter:04d}"
 
-                # Build flow sequence with full node data
-                sequence = []
+                # Build flow sequence with GraphNode objects
+                sequence: list[GraphNode] = []
                 for node_id in path:
                     node = nodes_by_id.get(node_id)
                     if node:
-                        # Check if this node should be excluded (fixture)
-                        if node.get('excludeFromFlows'):
-                            fixture_id = node.get('fixtureCallableId', 'UNKNOWN')
-                            sequence.append(f"FIXTURE_{fixture_id}")
-                        else:
-                            sequence.append(node)
+                        sequence.append(node)
 
-                # Determine entry point info
-                entry_node = nodes_by_id.get(entry_id, {})
-                entry_point_info = {
-                    'integrationId': entry_id,
-                    'unitId': entry_node.get('sourceUnit', 'unknown'),
-                    'callableId': entry_node.get('sourceCallableId', 'unknown'),
-                    'callableName': entry_node.get('sourceCallableName', 'unknown'),
-                    'wayIn': f"Call {entry_node.get('sourceCallableName', 'unknown')} to reach first integration point"
-                }
+                # Build entry point info
+                entry_node = nodes_by_id.get(entry_id)
+                if entry_node:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id=entry_node.source_unit,
+                        callable_id=entry_node.source_callable_id,
+                        callable_name=entry_node.source_callable_name,
+                        way_in=f"Call {entry_node.source_callable_name} to reach first integration point"
+                    )
+                else:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id='unknown',
+                        callable_id='unknown',
+                        callable_name='unknown',
+                        way_in='unknown'
+                    )
 
-                # Determine terminal node info
-                terminal_node = nodes_by_id.get(current_id, {})
-                terminal_node_info = {
-                    'integrationId': current_id,
-                    'boundary': terminal_node.get('boundary', {}).get('kind') if terminal_node.get('boundary') else None
-                }
+                # Build terminal node info
+                terminal_node_obj = nodes_by_id.get(current_id)
+                if terminal_node_obj:
+                    terminal_node_info = TerminalNodeInfo(
+                        integration_id=current_id,
+                        boundary=terminal_node_obj.boundary.kind if terminal_node_obj.boundary else None
+                    )
+                else:
+                    terminal_node_info = TerminalNodeInfo(
+                        integration_id=current_id,
+                        boundary=None
+                    )
 
                 # Build flow description
                 flow_description = ' → '.join([
-                    f"FIXTURE_{nodes_by_id.get(node_id, {}).get('fixtureCallableId', 'UNKNOWN')}"
-                    if nodes_by_id.get(node_id, {}).get('excludeFromFlows')
-                    else nodes_by_id.get(node_id, {}).get('target', 'unknown')
-                    for node_id in path
+                    f"FIXTURE_{node.fixture_callable_id or 'UNKNOWN'}"
+                    if node.exclude_from_flows
+                    else node.target
+                    for node in sequence
                 ])
 
-                flows.append({
-                    'flowId': flow_id,
-                    'description': flow_description,
-                    'length': len(path),
-                    'sequence': sequence,
-                    'entryPoint': entry_point_info,
-                    'terminalNode': terminal_node_info
-                })
+                flows.append(
+                    Flow(
+                        flow_id=flow_id,
+                        description=flow_description,
+                        length=len(path),
+                        sequence=sequence,
+                        entry_point=entry_point_info,
+                        terminal_node=terminal_node_info
+                    )
+                )
 
                 continue  # Don't explore further from terminal nodes
 
             # Check if current node should be excluded from flows (mechanical operation)
-            current_node = nodes_by_id.get(current_id, {})
-            if current_node.get('excludeFromFlows'):
+            current_node = nodes_by_id.get(current_id)
+            if current_node and current_node.exclude_from_flows:
                 # Treat this like a terminal node - record flow and stop
                 flow_counter += 1
                 flows_from_this_entry += 1
                 flow_id = f"FLOW_{flow_counter:04d}"
 
-                # Build flow sequence with fixture placeholder
-                sequence = []
+                # Build flow sequence with GraphNode objects
+                sequence: list[GraphNode] = []
                 for node_id in path:
                     node = nodes_by_id.get(node_id)
                     if node:
-                        if node.get('excludeFromFlows'):
-                            fixture_id = node.get('fixtureCallableId', 'UNKNOWN')
-                            sequence.append(f"FIXTURE_{fixture_id}")
-                        else:
-                            sequence.append(node)
+                        sequence.append(node)
 
-                # Entry point info
-                entry_node = nodes_by_id.get(entry_id, {})
-                entry_point_info = {
-                    'integrationId': entry_id,
-                    'unitId': entry_node.get('sourceUnit', 'unknown'),
-                    'callableId': entry_node.get('sourceCallableId', 'unknown'),
-                    'callableName': entry_node.get('sourceCallableName', 'unknown'),
-                    'wayIn': f"Call {entry_node.get('sourceCallableName', 'unknown')} to reach first integration point"
-                }
+                # Build entry point info
+                entry_node = nodes_by_id.get(entry_id)
+                if entry_node:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id=entry_node.source_unit,
+                        callable_id=entry_node.source_callable_id,
+                        callable_name=entry_node.source_callable_name,
+                        way_in=f"Call {entry_node.source_callable_name} to reach first integration point"
+                    )
+                else:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id='unknown',
+                        callable_id='unknown',
+                        callable_name='unknown',
+                        way_in='unknown'
+                    )
 
                 # Terminal is the excluded node
-                terminal_node_info = {
-                    'integrationId': current_id,
-                    'excludedOperation': current_node.get('fixtureCallableId'),
-                    'reason': 'MechanicalOperation or UtilityOperation'
-                }
+                terminal_node_info = TerminalNodeInfo(
+                    integration_id=current_id,
+                    excluded_operation=current_node.fixture_callable_id,
+                    reason='MechanicalOperation or UtilityOperation'
+                )
 
                 # Build flow description
                 flow_description = ' → '.join([
-                    f"FIXTURE_{nodes_by_id.get(node_id, {}).get('fixtureCallableId', 'UNKNOWN')}"
-                    if nodes_by_id.get(node_id, {}).get('excludeFromFlows')
-                    else nodes_by_id.get(node_id, {}).get('target', 'unknown')
-                    for node_id in path
+                    f"FIXTURE_{node.fixture_callable_id or 'UNKNOWN'}"
+                    if node.exclude_from_flows
+                    else node.target
+                    for node in sequence
                 ])
 
-                flows.append({
-                    'flowId': flow_id,
-                    'description': flow_description,
-                    'length': len(path),
-                    'sequence': sequence,
-                    'entryPoint': entry_point_info,
-                    'terminalNode': terminal_node_info
-                })
+                flows.append(
+                    Flow(
+                        flow_id=flow_id,
+                        description=flow_description,
+                        length=len(path),
+                        sequence=sequence,
+                        entry_point=entry_point_info,
+                        terminal_node=terminal_node_info
+                    )
+                )
 
                 continue  # Don't explore further from excluded nodes
 
@@ -274,8 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         '--output',
         type=Path,
-        default=config.get_stage_output(4),
-        help=f'Output file (default: {config.get_stage_output(4)})'
+        default=config.get_stage_output(5),
+        help=f'Output file (default: {config.get_stage_output(5)})'
     )
     ap.add_argument(
         '--target-root',
@@ -323,22 +346,22 @@ def main(argv: list[str] | None = None) -> int:
     # Build output
     output_data = {
         'stage': 'flow-enumeration',
-        'flows': flows
+        'flows': [flow.to_dict() for flow in flows]
     }
 
     if config.include_metadata():
         # Calculate stats
-        total_length = sum(f['length'] for f in flows)
+        total_length = sum(flow.length for flow in flows)
         avg_length = total_length / len(flows) if flows else 0
-        max_length = max((f['length'] for f in flows), default=0)
-        min_length = min((f['length'] for f in flows), default=0)
+        max_length = max((flow.length for flow in flows), default=0)
+        min_length = min((flow.length for flow in flows), default=0)
 
         output_data['metadata'] = {
             'flowCount': len(flows),
             'averageLength': round(avg_length, 2),
             'minLength': min_length,
             'maxLength': max_length,
-            'totalIntegrationPoints': sum(f['length'] for f in flows)
+            'totalIntegrationPoints': sum(flow.length for flow in flows)
         }
 
     # Ensure output directory exists
@@ -352,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Total flows: {len(flows)}")
 
     if flows:
-        lengths = [f['length'] for f in flows]
+        lengths = [flow.length for flow in flows]
         print(f"  Flow lengths: {min(lengths)} - {max(lengths)} (avg: {sum(lengths) / len(lengths):.1f})")
 
     if not flows:

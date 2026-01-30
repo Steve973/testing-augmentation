@@ -20,16 +20,16 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import config
-from shared.yaml_utils import yaml_load, yaml_dump
+from integration import config
+from ..shared.yaml_utils import yaml_load, yaml_dump
+from ..shared.data_structures import IntegrationPoint, IntegrationPointClassification, load_integration_points
 
 
-def classify_integration_points(points_data: dict[str, Any]) -> dict[str, Any]:
+def classify_integration_points(points: list[IntegrationPoint]) -> IntegrationPointClassification:
     """
     Classify integration points into entry/intermediate/terminal.
 
@@ -39,82 +39,61 @@ def classify_integration_points(points_data: dict[str, Any]) -> dict[str, Any]:
     - Intermediate: Everything else
 
     Args:
-        points_data: Integration points data from Stage 1
+        points: List of IntegrationPoint objects from Stage 1
 
     Returns:
-        Classification dict with categorized points
+        IntegrationPointClassification object
     """
-    points = points_data.get('integrationPoints', [])
-
     if not points:
-        return {
-            'stage': 'integration-point-classification',
-            'entryPoints': [],
-            'intermediateSeams': [],
-            'terminalNodes': [],
-            'metadata': {
-                'entryPointCount': 0,
-                'intermediateCount': 0,
-                'terminalNodeCount': 0,
-                'totalPoints': 0
-            }
-        }
+        return IntegrationPointClassification()
 
     # Build indexes for analysis
     # Map: callable_id -> list of integration point IDs where this callable is the SOURCE
-    callables_with_outgoing = {}
+    callables_with_outgoing: dict[str, list[str]] = {}
 
     # Map: target_raw -> list of integration point IDs that call this target
-    targets_with_incoming = {}
+    targets_with_incoming: dict[str, list[str]] = {}
 
     # Set of all boundary integration IDs
-    boundary_ids = set()
+    boundary_ids: set[str] = set()
 
     for point in points:
-        point_id = point.get('id')
-        source_callable = point.get('sourceCallableId')
-        target = point.get('target', '')
-
         # Track which callables have outgoing calls
-        if source_callable:
-            if source_callable not in callables_with_outgoing:
-                callables_with_outgoing[source_callable] = []
-            callables_with_outgoing[source_callable].append(point_id)
+        if point.source_callable_id:
+            if point.source_callable_id not in callables_with_outgoing:
+                callables_with_outgoing[point.source_callable_id] = []
+            callables_with_outgoing[point.source_callable_id].append(point.id)
 
         # Track which targets have incoming calls
-        if target:
-            if target not in targets_with_incoming:
-                targets_with_incoming[target] = []
-            targets_with_incoming[target].append(point_id)
+        if point.target_raw:
+            if point.target_raw not in targets_with_incoming:
+                targets_with_incoming[point.target_raw] = []
+            targets_with_incoming[point.target_raw].append(point.id)
 
         # Track boundaries
-        if point.get('boundary'):
-            boundary_ids.add(point_id)
+        if point.boundary:
+            boundary_ids.add(point.id)
 
     # Now classify each point
-    entry_points = []
-    intermediate_seams = []
-    terminal_nodes = []
+    entry_points: list[str] = []
+    intermediate_seams: list[str] = []
+    terminal_nodes: list[str] = []
 
     for point in points:
-        point_id = point.get('id')
-        source_callable = point.get('sourceCallableId')
-        target = point.get('target', '')
-
         # Boundary integrations are ALWAYS terminal nodes
-        if point_id in boundary_ids:
-            terminal_nodes.append(point_id)
+        if point.id in boundary_ids:
+            terminal_nodes.append(point.id)
             continue
 
         # Check if source callable is an entry point (no incoming interunit calls)
-        source_is_entry = source_callable not in targets_with_incoming
+        source_is_entry = point.source_callable_id not in targets_with_incoming
 
         # Check if target is a terminal (no outgoing calls)
         # We look for the target in our callables_with_outgoing map
         # If target is not there, it either:
         #   1. Is not in our scope (external/stdlib) -> treat as terminal
         #   2. Has no outgoing calls -> terminal
-        target_is_terminal = target not in callables_with_outgoing
+        target_is_terminal = point.target_raw not in callables_with_outgoing
 
         # Classification decision tree:
         # - If source is entry AND target is terminal -> this is BOTH, but we'll call it entry
@@ -123,30 +102,17 @@ def classify_integration_points(points_data: dict[str, Any]) -> dict[str, Any]:
         # - Otherwise -> intermediate
 
         if source_is_entry:
-            entry_points.append(point_id)
+            entry_points.append(point.id)
         elif target_is_terminal:
-            terminal_nodes.append(point_id)
+            terminal_nodes.append(point.id)
         else:
-            intermediate_seams.append(point_id)
+            intermediate_seams.append(point.id)
 
-    # Build output
-    result = {
-        'stage': 'integration-point-classification',
-        'entryPoints': entry_points,
-        'intermediateSeams': intermediate_seams,
-        'terminalNodes': terminal_nodes,
-    }
-
-    if config.include_metadata():
-        result['metadata'] = {
-            'entryPointCount': len(entry_points),
-            'intermediateCount': len(intermediate_seams),
-            'terminalNodeCount': len(terminal_nodes),
-            'totalPoints': len(points),
-            'boundaryCount': len(boundary_ids)
-        }
-
-    return result
+    return IntegrationPointClassification(
+        entry_points=entry_points,
+        intermediate_seams=intermediate_seams,
+        terminal_nodes=terminal_nodes
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,32 +163,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Loading integration points from: {args.input}")
 
     points_data = yaml_load(args.input)
+    points = load_integration_points(points_data)
 
     if args.verbose:
-        total_points = len(points_data.get('integrationPoints', []))
-        print(f"Loaded {total_points} integration points")
+        print(f"Loaded {len(points)} integration points")
 
     # Classify
     if args.verbose:
         print("\nClassifying integration points...")
 
-    classification = classify_integration_points(points_data)
+    classification = classify_integration_points(points)
 
     # Ensure output directory exists
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write output
-    args.output.write_text(yaml_dump(classification), encoding='utf-8')
+    # Write output - just call to_dict() and dump
+    args.output.write_text(yaml_dump(classification.to_dict()), encoding='utf-8')
 
     # Summary
-    entry_count = len(classification.get('entryPoints', []))
-    intermediate_count = len(classification.get('intermediateSeams', []))
-    terminal_count = len(classification.get('terminalNodes', []))
-
     print(f"\n✓ Classification complete → {args.output}")
-    print(f"  Entry points: {entry_count}")
-    print(f"  Intermediate: {intermediate_count}")
-    print(f"  Terminal nodes: {terminal_count}")
+    print(f"  Entry points: {len(classification.entry_points)}")
+    print(f"  Intermediate: {len(classification.intermediate_seams)}")
+    print(f"  Terminal nodes: {len(classification.terminal_nodes)}")
 
     return 0
 

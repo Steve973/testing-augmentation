@@ -22,12 +22,50 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+# Add integration directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from ..shared.data_structures import load_graph_nodes, TargetAnalysis, TargetAccumulator
+from ..shared.yaml_utils import yaml_load
+
 try:
     import yaml
 except ImportError:
     print("ERROR: PyYAML not installed. Run: pip install pyyaml",
           file=sys.stderr)
     sys.exit(1)
+
+# =============================================================================
+# Decorator Pattern Recognition
+# =============================================================================
+
+# MechanicalOperation patterns - deterministic data transformations
+MECHANICAL_SERIALIZATION_PATTERNS = [
+    'to_mapping', 'from_mapping', 'to_dict', 'from_dict',
+    'serialize', 'deserialize', 'to_json', 'from_json',
+    'to_toml', 'from_toml', 'to_yaml', 'from_yaml'
+]
+
+MECHANICAL_FORMATTING_PATTERNS = [
+    'normalize', '_normalize', 'format', 'sanitize', '_safe_'
+]
+
+# UtilityOperation patterns - cross-cutting infrastructure
+UTILITY_VALIDATION_PATTERNS = [
+    'validate', 'check_schema', 'verify_format', 'assert_valid'
+]
+
+UTILITY_LOGGING_PATTERNS = [
+    'log', 'logger', 'audit', 'record'
+]
+
+UTILITY_CACHING_PATTERNS = [
+    'cache', 'cached', 'memoize'
+]
+
+UTILITY_HASHING_PATTERNS = [
+    'hash', '_hash', 'checksum', 'digest', '_short_hash'
+]
 
 
 def suggest_decorator_type(
@@ -45,37 +83,23 @@ def suggest_decorator_type(
         name = (name + " " + callable_name.lower())
 
     # MechanicalOperation patterns
-    if any(kw in name for kw in [
-        'to_mapping', 'from_mapping', 'to_dict', 'from_dict',
-        'serialize', 'deserialize', 'to_json', 'from_json',
-        'to_toml', 'from_toml'
-    ]):
+    if any(kw in name for kw in MECHANICAL_SERIALIZATION_PATTERNS):
         return 'MechanicalOperation', 'serialization'
 
-    if any(kw in name for kw in [
-        'validate', 'check_schema', 'verify_format'
-    ]):
-        return 'UtilityOperation', 'validation'
-
-    if any(kw in name for kw in [
-        'normalize', '_normalize', 'format', 'sanitize', '_safe_'
-    ]):
+    if any(kw in name for kw in MECHANICAL_FORMATTING_PATTERNS):
         return 'MechanicalOperation', 'formatting'
 
     # UtilityOperation patterns
-    if any(kw in name for kw in [
-        'log', 'logger', 'audit', 'record'
-    ]):
+    if any(kw in name for kw in UTILITY_VALIDATION_PATTERNS):
+        return 'UtilityOperation', 'validation'
+
+    if any(kw in name for kw in UTILITY_LOGGING_PATTERNS):
         return 'UtilityOperation', 'logging'
 
-    if any(kw in name for kw in [
-        'cache', 'cached', 'memoize'
-    ]):
+    if any(kw in name for kw in UTILITY_CACHING_PATTERNS):
         return 'UtilityOperation', 'caching'
 
-    if any(kw in name for kw in [
-        'hash', '_hash', 'checksum', 'digest', '_short_hash'
-    ]):
+    if any(kw in name for kw in UTILITY_HASHING_PATTERNS):
         return 'UtilityOperation', 'hashing'
 
     # Default
@@ -102,57 +126,51 @@ def analyze_graph(graph_file: Path, verbose: bool = False) -> dict[str, Any]:
     if verbose:
         print(f"Loading graph from: {graph_file}")
 
-    with open(graph_file) as f:
-        data = yaml.safe_load(f)
+    data = yaml_load(graph_file)
 
-    nodes = {n['id']: n for n in data.get('nodes', [])}
+    nodes_list = load_graph_nodes(data)
+    nodes = {n.id: n for n in nodes_list}
     edges = data.get('edges', [])
 
-    # Group edges by target callable
-    # Key: (unit, callableId) or target name if unresolved
-    # Value: list of integration nodes pointing to this target
-    targets = defaultdict(lambda: {
-        'incoming_nodes': [],
-        'incoming_edges': 0,
-        'target_name': None,
-        'unit_name': None,
-        'callable_id': None,
-        'callable_name': None,
-        'resolved': False,
-        'excluded': False
-    })
+    # Group edges by target callable using accumulator
+    targets: dict[str, TargetAccumulator] = {}
 
     # First pass: build target groups
     for node in nodes.values():
-        target_resolved = node.get('targetResolved', {})
+        target_resolved = node.target_resolved
 
-        if target_resolved.get('status') == 'resolved':
+        if target_resolved.status == 'resolved':
             # Use resolved callable ID as key
-            unit = target_resolved.get('unitName', 'unknown')
-            callable_id = target_resolved.get('callableId', 'unknown')
+            unit = target_resolved.unit_name or 'unknown'
+            callable_id = target_resolved.callable_id or 'unknown'
             key = f"{unit}::{callable_id}"
 
-            targets[key]['target_name'] = target_resolved.get('name',
-                                                              node['target'])
-            targets[key]['unit_name'] = unit
-            targets[key]['callable_id'] = callable_id
-            targets[key]['callable_name'] = target_resolved.get(
-                'callableName',
-                node['target']
-            )
-            targets[key]['resolved'] = True
+            # Get or create accumulator
+            if key not in targets:
+                targets[key] = TargetAccumulator(
+                    target_name=target_resolved.name or node.target,
+                    unit_name=unit,
+                    callable_id=callable_id,
+                    callable_name=target_resolved.callable_name or node.target,
+                    resolved=True
+                )
+            acc = targets[key]
         else:
             # Unresolved - group by target name
-            key = f"UNRESOLVED::{node['target']}"
-            targets[key]['target_name'] = node['target']
-            targets[key]['resolved'] = False
+            key = f"UNRESOLVED::{node.target}"
+            if key not in targets:
+                targets[key] = TargetAccumulator(
+                    target_name=node.target,
+                    resolved=False
+                )
+            acc = targets[key]
 
         # Check if this node is excluded
-        if node.get('excludeFromFlows', False):
-            targets[key]['excluded'] = True
+        if node.exclude_from_flows:
+            acc.excluded = True
 
         # Add this node to incoming list
-        targets[key]['incoming_nodes'].append(node['id'])
+        acc.incoming_nodes.append(node.id)
 
     # Second pass: count incoming edges to each target
     for edge in edges:
@@ -164,47 +182,50 @@ def analyze_graph(graph_file: Path, verbose: bool = False) -> dict[str, Any]:
             continue
 
         to_node = nodes[to_node_id]
-        target_resolved = to_node.get('targetResolved', {})
+        target_resolved = to_node.target_resolved
 
-        if target_resolved.get('status') == 'resolved':
-            unit = target_resolved.get('unitName', 'unknown')
-            callable_id = target_resolved.get('callableId', 'unknown')
+        if target_resolved.status == 'resolved':
+            unit = target_resolved.unit_name or 'unknown'
+            callable_id = target_resolved.callable_id or 'unknown'
             key = f"{unit}::{callable_id}"
         else:
-            key = f"UNRESOLVED::{to_node['target']}"
+            key = f"UNRESOLVED::{to_node.target}"
 
-        targets[key]['incoming_edges'] += 1
+        if key in targets:
+            targets[key].incoming_edges += 1
 
-    # Convert to list and sort by incoming edges
-    target_list = []
-    for key, info in targets.items():
-        target_list.append({
-            'key': key,
-            'target_name': info['target_name'],
-            'unit_name': info['unit_name'],
-            'callable_id': info['callable_id'],
-            'callable_name': info['callable_name'],
-            'resolved': info['resolved'],
-            'excluded': info['excluded'],
-            'incoming_node_count': len(info['incoming_nodes']),
-            'incoming_edge_count': info['incoming_edges'],
-            'incoming_nodes': info['incoming_nodes']
-        })
+    # Convert to TargetAnalysis list and sort by incoming edges
+    target_list: list[TargetAnalysis] = []
+    for key, acc in targets.items():
+        target_list.append(
+            TargetAnalysis(
+                key=key,
+                target_name=acc.target_name,
+                unit_name=acc.unit_name,
+                callable_id=acc.callable_id,
+                callable_name=acc.callable_name,
+                resolved=acc.resolved,
+                excluded=acc.excluded,
+                incoming_node_count=len(acc.incoming_nodes),
+                incoming_edge_count=acc.incoming_edges,
+                incoming_nodes=acc.incoming_nodes
+            )
+        )
 
-    target_list.sort(key=lambda x: x['incoming_edge_count'], reverse=True)
+    target_list.sort(key=lambda x: x.incoming_edge_count, reverse=True)
 
     # Separate excluded vs candidates
-    already_excluded = [t for t in target_list if t['excluded']]
-    candidates = [t for t in target_list if not t['excluded']]
+    already_excluded = [t for t in target_list if t.excluded]
+    candidates = [t for t in target_list if not t.excluded]
 
     # Add decorator suggestions to candidates
     for candidate in candidates:
         decorator, op_type = suggest_decorator_type(
-            candidate['target_name'],
-            candidate['callable_name']
+            candidate.target_name,
+            candidate.callable_name
         )
-        candidate['suggested_decorator'] = decorator
-        candidate['suggested_type'] = op_type
+        candidate.suggested_decorator = decorator
+        candidate.suggested_type = op_type
 
     # Calculate stats
     total_nodes = len(nodes)
@@ -212,7 +233,7 @@ def analyze_graph(graph_file: Path, verbose: bool = False) -> dict[str, Any]:
     total_targets = len(targets)
 
     excluded_count = len(already_excluded)
-    excluded_edges = sum(t['incoming_edge_count'] for t in already_excluded)
+    excluded_edges = sum(t.incoming_edge_count for t in already_excluded)
 
     return {
         'total_nodes': total_nodes,
@@ -220,8 +241,8 @@ def analyze_graph(graph_file: Path, verbose: bool = False) -> dict[str, Any]:
         'total_targets': total_targets,
         'excluded_count': excluded_count,
         'excluded_edges': excluded_edges,
-        'already_excluded': already_excluded,
-        'candidates': candidates
+        'already_excluded': [t.to_dict() for t in already_excluded],
+        'candidates': [t.to_dict() for t in candidates]
     }
 
 

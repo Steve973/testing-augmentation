@@ -29,11 +29,15 @@ from typing import Any
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import config
-from shared.yaml_utils import yaml_load, yaml_dump
+from integration import config
+from ..shared.yaml_utils import yaml_load, yaml_dump
+from ..shared.data_structures import (
+    TestWindow, WindowEntryPoint, WindowExitPoint,
+    GraphNode, load_flows, Flow
+)
 
 
-def generate_windows(flows_data: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
+def generate_windows(flows_data: dict[str, Any], verbose: bool = False) -> list[TestWindow]:
     """
     Generate sliding windows from flows.
 
@@ -41,13 +45,13 @@ def generate_windows(flows_data: dict[str, Any], verbose: bool = False) -> list[
     Windows slide by 1 integration point for complete coverage.
 
     Args:
-        flows_data: Flows from Stage 4
+        flows_data: Flows from Stage 5
         verbose: Print progress information
 
     Returns:
-        List of Window dicts
+        List of TestWindow objects
     """
-    flows = flows_data.get('flows', [])
+    flows: list[Flow] = load_flows(flows_data)
 
     if not flows:
         return []
@@ -64,18 +68,16 @@ def generate_windows(flows_data: dict[str, Any], verbose: bool = False) -> list[
         print(f"  Generating windows from {len(flows)} flows...")
         print(f"  Window size: {min_length} - {max_display} integration points")
 
-    windows = []
+    windows: list[TestWindow] = []
     window_counter = 0
 
     for flow in flows:
-        flow_id = flow.get('flowId', 'unknown')
-        sequence = flow.get('sequence', [])
-        flow_length = len(sequence)
+        flow_length = len(flow.sequence)
 
         if flow_length < min_length:
             # Flow too short for minimum window
             if verbose:
-                print(f"    Skipping {flow_id}: length {flow_length} < min {min_length}")
+                print(f"    Skipping {flow.flow_id}: length {flow_length} < min {min_length}")
             continue
 
         # Determine window size for this flow
@@ -85,45 +87,49 @@ def generate_windows(flows_data: dict[str, Any], verbose: bool = False) -> list[
         # Generate sliding windows
         for start_idx in range(flow_length - window_size + 1):
             end_idx = start_idx + window_size
-            window_sequence = sequence[start_idx:end_idx]
+            window_sequence: list[GraphNode] = flow.sequence[start_idx:end_idx]
 
             window_counter += 1
             window_id = f"WINDOW_{window_counter:05d}"
 
             # Extract integration IDs for the window
-            integration_ids = [node.get('id', 'unknown') for node in window_sequence]
+            integration_ids = [node.id for node in window_sequence]
 
-            # Determine entry and exit points for this window
-            entry_node = window_sequence[0] if window_sequence else {}
-            exit_node = window_sequence[-1] if window_sequence else {}
+            # Build entry and exit points
+            entry_node = window_sequence[0]
+            exit_node = window_sequence[-1]
+
+            entry_point = WindowEntryPoint(
+                integration_id=entry_node.id,
+                unit=entry_node.source_unit,
+                callable=entry_node.source_callable_name,
+                target=entry_node.target
+            )
+
+            exit_point = WindowExitPoint(
+                integration_id=exit_node.id,
+                unit=exit_node.source_unit,
+                callable=exit_node.source_callable_name,
+                target=exit_node.target,
+                is_boundary=exit_node.boundary is not None
+            )
 
             # Build window description
-            window_desc = ' → '.join([
-                node.get('target', 'unknown') for node in window_sequence
-            ])
+            window_desc = ' → '.join([node.target for node in window_sequence])
 
-            windows.append({
-                'windowId': window_id,
-                'sourceFlowId': flow_id,
-                'startPosition': start_idx,
-                'length': len(window_sequence),
-                'integrationIds': integration_ids,
-                'entryPoint': {
-                    'integrationId': entry_node.get('id', 'unknown'),
-                    'unit': entry_node.get('sourceUnit', 'unknown'),
-                    'callable': entry_node.get('sourceCallableName', 'unknown'),
-                    'target': entry_node.get('target', 'unknown')
-                },
-                'exitPoint': {
-                    'integrationId': exit_node.get('id', 'unknown'),
-                    'unit': exit_node.get('sourceUnit', 'unknown'),
-                    'callable': exit_node.get('sourceCallableName', 'unknown'),
-                    'target': exit_node.get('target', 'unknown'),
-                    'isBoundary': exit_node.get('boundary') is not None
-                },
-                'description': window_desc,
-                'sequence': window_sequence
-            })
+            windows.append(
+                TestWindow(
+                    window_id=window_id,
+                    source_flow_id=flow.flow_id,
+                    start_position=start_idx,
+                    length=len(window_sequence),
+                    integration_ids=integration_ids,
+                    entry_point=entry_point,
+                    exit_point=exit_point,
+                    description=window_desc,
+                    sequence=window_sequence
+                )
+            )
 
     if verbose:
         print(f"  Generated {len(windows)} windows")
@@ -140,14 +146,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         '--input',
         type=Path,
-        default=config.get_stage_output(4),
-        help=f'Flows from Stage 4 (default: {config.get_stage_output(4)})'
+        default=config.get_stage_output(5),
+        help=f'Flows from Stage 5 (default: {config.get_stage_output(5)})'
     )
     ap.add_argument(
         '--output',
         type=Path,
-        default=config.get_stage_output(5),
-        help=f'Output file (default: {config.get_stage_output(5)})'
+        default=config.get_stage_output(6),
+        help=f'Output file (default: {config.get_stage_output(6)})'
     )
     ap.add_argument(
         '--target-root',
@@ -191,27 +197,27 @@ def main(argv: list[str] | None = None) -> int:
     windows = generate_windows(flows_data, verbose=args.verbose)
 
     # Build output
-    output_data = {
+    output_data: dict[str, Any] = {
         'stage': 'test-window-generation',
-        'windows': windows
+        'windows': [w.to_dict() for w in windows]
     }
 
     if config.include_metadata():
         # Calculate stats
-        total_integrations = sum(w['length'] for w in windows)
+        total_integrations = sum(w.length for w in windows)
         avg_length = total_integrations / len(windows) if windows else 0
 
         # Count unique flows covered
-        unique_flows = len(set(w['sourceFlowId'] for w in windows))
+        unique_flows = len(set(w.source_flow_id for w in windows))
 
         output_data['metadata'] = {
-            'windowCount': len(windows),
-            'sourceFlowCount': flow_count,
-            'flowsCovered': unique_flows,
-            'averageWindowLength': round(avg_length, 2),
-            'totalIntegrationPoints': total_integrations,
-            'minWindowLength': config.get_min_window_length(),
-            'maxWindowLength': config.get_max_window_length()
+            'window_count': len(windows),
+            'source_flow_count': flow_count,
+            'flows_covered': unique_flows,
+            'average_window_length': round(avg_length, 2),
+            'total_integration_points': total_integrations,
+            'min_window_length': config.get_min_window_length(),
+            'max_window_length': config.get_max_window_length()
         }
 
     # Ensure output directory exists
@@ -226,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  From {flow_count} flows")
 
     if windows:
-        lengths = [w['length'] for w in windows]
+        lengths = [w.length for w in windows]
         print(f"  Window sizes: {min(lengths)} - {max(lengths)} integration points")
 
     return 0
