@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""
+Transform inventory files into unit ledger YAML format.
+
+Takes inventory with CallableEntry objects and branches, generates
+the three-document ledger format required by the specification.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import yaml
+from pathlib import Path
+from typing import Any
+
+from models import CallableEntry, IntegrationCategory
+
+
+# =============================================================================
+# Document 1: Derived IDs
+# =============================================================================
+
+def generate_derived_ids_doc(
+        unit_name: str,
+        language: str,
+        unit_id: str,
+        entries: list[CallableEntry]
+) -> dict[str, Any]:
+    """Generate Document 1: Derived IDs."""
+
+    def collect_entries(entries_list: list[CallableEntry], collected: list[dict[str, Any]]) -> None:
+        """Recursively collect entry assignments."""
+        for entry in entries_list:
+            collected.append({
+                'id': entry.id,
+                'kind': entry.kind,
+                'name': entry.name,
+                'address': f'{unit_name}::{entry.name}@L{entry.line_start}'
+            })
+            if entry.children:
+                collect_entries(entry.children, collected)
+
+    def collect_branches(entries_list: list[CallableEntry], collected: list[dict[str, Any]]) -> None:
+        """Recursively collect branch (EI) assignments."""
+        for entry in entries_list:
+            if entry.branches:
+                for branch in entry.branches:
+                    collected.append({
+                        'id': branch.id,
+                        'address': f'{unit_name}::{entry.name}@L{branch.line}',
+                        'summary': f'{branch.condition} → {branch.outcome}'
+                    })
+            if entry.children:
+                collect_branches(entry.children, collected)
+
+    entry_assignments: list[dict[str, Any]] = []
+    branch_assignments: list[dict[str, Any]] = []
+
+    collect_entries(entries, entry_assignments)
+    collect_branches(entries, branch_assignments)
+
+    return {
+        'docKind': 'derived-ids',
+        'schemaVersion': '1.0.0',
+        'unit': {
+            'name': unit_name,
+            'language': language,
+            'unitId': unit_id
+        },
+        'assigned': {
+            'entries': entry_assignments,
+            'branches': branch_assignments
+        }
+    }
+
+
+# =============================================================================
+# Document 2: Ledger
+# =============================================================================
+
+def transform_entry_to_ledger(
+        entry: CallableEntry,
+        project_types: set[str]
+) -> dict[str, Any]:
+    """Transform a CallableEntry to ledger Entry format."""
+
+    ledger_entry: dict[str, Any] = {
+        'id': entry.id,
+        'kind': entry.kind,
+        'name': entry.name
+    }
+
+    # Add optional fields
+    if entry.visibility:
+        ledger_entry['visibility'] = entry.visibility
+
+    if entry.signature:
+        ledger_entry['signature'] = entry.signature
+
+    if entry.decorators:
+        ledger_entry['decorators'] = entry.decorators
+
+    if entry.modifiers:
+        ledger_entry['modifiers'] = entry.modifiers
+
+    if entry.base_classes:
+        ledger_entry['base_classes'] = entry.base_classes
+
+    # Handle callable-specific fields
+    if entry.needs_callable_analysis:
+        callable_spec = entry.to_ledger_callable_spec(project_types)
+        ledger_entry['callable'] = callable_spec
+
+    # Recursively transform children
+    if entry.children:
+        ledger_entry['children'] = [
+            transform_entry_to_ledger(child, project_types)
+            for child in entry.children
+        ]
+
+    return ledger_entry
+
+
+def generate_ledger_doc(
+        unit_id: str,
+        unit_name: str,
+        entries: list[CallableEntry],
+        project_types: set[str]
+) -> dict[str, Any]:
+    """Generate Document 2: Ledger."""
+
+    # Transform all entries
+    ledger_entries = [
+        transform_entry_to_ledger(entry, project_types)
+        for entry in entries
+    ]
+
+    # Create unit entry
+    unit_entry: dict[str, Any] = {
+        'id': unit_id,
+        'kind': 'unit',
+        'name': unit_name,
+        'children': ledger_entries
+    }
+
+    return {
+        'docKind': 'ledger',
+        'schemaVersion': '1.0.0',
+        'unit': unit_entry
+    }
+
+
+# =============================================================================
+# Document 3: Review
+# =============================================================================
+
+def generate_review_doc(
+        unit_name: str,
+        language: str,
+        entries: list[CallableEntry],
+        project_types: set[str]
+) -> dict[str, Any]:
+    """Generate Document 3: Ledger Generation Review."""
+
+    # Count stats
+    callables_analyzed = 0
+    total_eis = 0
+    integration_counts: dict[IntegrationCategory, int] = {
+        IntegrationCategory.INTERUNIT: 0,
+        IntegrationCategory.EXTLIB: 0,
+        IntegrationCategory.BOUNDARY: 0,
+        IntegrationCategory.UNKNOWN: 0
+    }
+    unknown_integrations: list[str] = []
+
+    def count_recursive(entries_list: list[CallableEntry]) -> None:
+        """Recursively count stats."""
+        nonlocal callables_analyzed, total_eis
+
+        for entry in entries_list:
+            if entry.needs_callable_analysis:
+                callables_analyzed += 1
+                total_eis += len(entry.branches)
+
+                # Categorize integrations
+                categorized = entry.categorize_integrations(project_types)
+                for category_str, facts in categorized.items():
+                    category = IntegrationCategory(category_str)
+                    integration_counts[category] += len(facts)
+
+                    # Track unknown integrations for findings
+                    if category == IntegrationCategory.UNKNOWN:
+                        for fact in facts:
+                            # Integration ID might not exist if no execution paths
+                            if 'id' in fact:
+                                unknown_integrations.append(fact['id'])
+                            else:
+                                unknown_integrations.append(f"{fact['target']} (no execution path)")
+
+            if entry.children:
+                count_recursive(entry.children)
+
+    count_recursive(entries)
+
+    # Build findings
+    findings: list[dict[str, Any]] = []
+
+    if unknown_integrations:
+        findings.append({
+            'severity': 'warn',
+            'category': 'ambiguity',
+            'message': f'Could not categorize {len(unknown_integrations)} integration point(s) - marked as unknown',
+            'appliesTo': unknown_integrations,
+            'recommendedAction': 'Review unknown integrations and update project type inventory or categorization rules'
+        })
+
+    return {
+        'docKind': 'ledger-generation-review',
+        'schemaVersion': '1.0.0',
+        'unit': {
+            'name': unit_name,
+            'language': language,
+            'callablesAnalyzed': str(callables_analyzed),
+            'totalExeItems': str(total_eis),
+            'interunitIntegrations': str(integration_counts[IntegrationCategory.INTERUNIT]),
+            'extlibIntegrations': str(integration_counts[IntegrationCategory.EXTLIB]),
+            'boundaryIntegrations': str(integration_counts[IntegrationCategory.BOUNDARY])
+        },
+        'findings': findings
+    }
+
+
+# =============================================================================
+# Main Transformation
+# =============================================================================
+
+def load_project_types(project_inventory_path: Path | None) -> set[str]:
+    """
+    Load project type inventory from file.
+
+    Expected format: one fully-qualified name per line.
+    """
+    if not project_inventory_path or not project_inventory_path.exists():
+        return set()
+
+    project_types: set[str] = set()
+    with open(project_inventory_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                project_types.add(line)
+
+    return project_types
+
+
+def transform_inventory_to_ledger(
+        inventory_path: Path,
+        project_inventory_path: Path | None,
+        output_path: Path
+) -> None:
+    """Transform inventory YAML to three-document ledger YAML."""
+
+    # Load inventory
+    print(f"Loading inventory: {inventory_path}")
+    with open(inventory_path, 'r', encoding='utf-8') as f:
+        inventory = yaml.safe_load(f)
+
+    # Extract metadata
+    unit_name = inventory['unit']
+    language = inventory['language']
+    unit_id = inventory['unit_id']
+
+    # Parse entries to CallableEntry objects
+    print(f"  → Parsing {len(inventory['entries'])} entries")
+    entries = [CallableEntry.from_dict(e) for e in inventory['entries']]
+
+    # Load project types
+    project_types = load_project_types(project_inventory_path)
+    print(f"  → Loaded {len(project_types)} project types")
+
+    # Generate three documents
+    print("  → Generating Document 1 (Derived IDs)")
+    doc1 = generate_derived_ids_doc(unit_name, language, unit_id, entries)
+
+    print("  → Generating Document 2 (Ledger)")
+    doc2 = generate_ledger_doc(unit_id, unit_name, entries, project_types)
+
+    print("  → Generating Document 3 (Review)")
+    doc3 = generate_review_doc(unit_name, language, entries, project_types)
+
+    # Write three-document YAML
+    print(f"  → Writing ledger: {output_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        # Document 1
+        yaml.dump(doc1, f, sort_keys=False, allow_unicode=True, width=float('inf'))
+        f.write('\n---\n')
+
+        # Document 2
+        yaml.dump(doc2, f, sort_keys=False, allow_unicode=True, width=float('inf'))
+        f.write('\n---\n')
+
+        # Document 3
+        yaml.dump(doc3, f, sort_keys=False, allow_unicode=True, width=float('inf'))
+
+    # Print summary
+    summary = inventory.get('summary', {})
+    print(f"\n✓ Ledger generated successfully")
+    print(f"  Unit: {unit_name} ({language})")
+    print(f"  Callables: {doc3['unit']['callablesAnalyzed']}")
+    print(f"  Total EIs: {doc3['unit']['totalExeItems']}")
+    print(f"  Integrations: {doc3['unit']['interunitIntegrations']} interunit, "
+          f"{doc3['unit']['extlibIntegrations']} extlib, "
+          f"{doc3['unit']['boundaryIntegrations']} boundary")
+    if doc3['findings']:
+        print(f"  Findings: {len(doc3['findings'])}")
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Transform inventory YAML to unit ledger format',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument('--inventory', type=Path, required=True,
+                        help='Path to inventory YAML file')
+    parser.add_argument('--project-inventory', type=Path,
+                        help='Path to project type inventory file')
+    parser.add_argument('--output', type=Path, required=True,
+                        help='Path for output ledger YAML')
+
+    args = parser.parse_args()
+
+    if not args.inventory.exists():
+        print(f"Error: Inventory file not found: {args.inventory}")
+        return 1
+
+    try:
+        transform_inventory_to_ledger(
+            args.inventory,
+            args.project_inventory,
+            args.output
+        )
+        return 0
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

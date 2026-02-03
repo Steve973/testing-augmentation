@@ -6,6 +6,7 @@ Orchestrates the multi-stage pipeline for analyzing Python projects:
 1. inspect_units.py - Basic unit structure
 2. enumerate_exec_items.py - EI enumeration
 3. enumerate_callables.py - Integration classification + EI merging
+4. inventory_to_ledger.py - Generate three-document ledgers
 """
 
 import argparse
@@ -14,20 +15,29 @@ import sys
 from pathlib import Path
 
 
-def run_command(cmd: list[str], description: str) -> bool:
+def run_command(cmd: list[str], description: str, log_dir: Path = Path("/tmp/ledger")) -> bool:
     """Run a command and return success status."""
     print(f"\n{'=' * 70}")
     print(f"{description}")
     print(f"{'=' * 70}")
     print(f"Command: {' '.join(str(c) for c in cmd)}\n")
 
-    result = subprocess.run(cmd)
+    Path.mkdir(log_dir, exist_ok=True, parents=True)
+
+    # Create log file name from description
+    log_name = description.lower().replace(' ', '_').replace(':', '').replace('-', '_') + '.log'
+    log_file = log_dir / log_name
+
+    with open(log_file, 'w') as f:
+        result = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, text=True)
 
     if result.returncode != 0:
         print(f"\n✗ Failed: {description}")
+        print(f"   See log: {log_file}")
         return False
 
     print(f"\n✓ Completed: {description}")
+    print(f"   Log: {log_file}")
     return True
 
 
@@ -56,6 +66,7 @@ def analyze_project(
     inspect_output = project_root / output_root / "inspect"
     eis_output = project_root / output_root / "eis"
     inventory_output = project_root / output_root / "inventory"
+    ledgers_output = project_root / output_root / "ledgers"
 
     print(f"\n{'=' * 70}")
     print(f"Project Analysis Pipeline")
@@ -65,10 +76,11 @@ def analyze_project(
     print(f"Inspect output:    {inspect_output}")
     print(f"EIs output:        {eis_output}")
     print(f"Inventory output:  {inventory_output}")
+    print(f"Ledgers output:    {ledgers_output}")
     print(f"{'=' * 70}")
 
     # Stage 1: inspect_units (if it exists)
-    inspect_script = Path("inspect_units.py")
+    inspect_script = Path(__file__).parent / "inspect_units.py"
     if inspect_script.exists():
         cmd = [
             sys.executable,
@@ -123,23 +135,97 @@ def analyze_project(
 
     print(f"\n✓ Completed: Stage 2")
 
-    # Stage 3: enumerate_callables
+    # Stage 3: enumerate_callables (per-file processing)
     enumerate_callables_script = Path(__file__).parent / "enumerate_callables.py"
     if not enumerate_callables_script.exists():
         print(f"Error: enumerate_callables.py not found at {enumerate_callables_script}")
         return False
 
-    cmd = [
-        sys.executable,
-        str(enumerate_callables_script),
-        str(project_root),
-        "--source-root", source_root,
-        "--output-root", str(inventory_output.relative_to(project_root)),
-        "--ei-root", str(eis_output.relative_to(project_root))
-    ]
+    # Create output directory
+    inventory_output.mkdir(parents=True, exist_ok=True)
 
-    if not run_command(cmd, "Stage 3: Enumerate Callables + Merge EI Data"):
-        return False
+    print(f"\n{'=' * 70}")
+    print(f"Stage 3: Enumerate Callables + Merge EI Data")
+    print(f"{'=' * 70}")
+    print(f"Processing {len(py_files)} Python files\n")
+
+    for py_file in sorted(py_files):
+        # Derive FQN from file path
+        rel_path = py_file.relative_to(source_path)
+        fqn = str(rel_path.with_suffix('')).replace('/', '.').replace('\\', '.')
+        if fqn.endswith('.__init__'):
+            fqn = fqn[:-9]
+
+        cmd = [
+            sys.executable,
+            str(enumerate_callables_script),
+            "--file", str(py_file),
+            "--fqn", fqn,
+            "--output-root", str(inventory_output),
+            "--ei-root", str(eis_output)
+        ]
+
+        print(f"Processing: {rel_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print(f"  ✗ Failed")
+            print(result.stderr)
+        else:
+            print(f"  ✓ Inventory generated")
+
+        print(f"result: {result.stdout}")
+
+    print(f"\n✓ Completed: Stage 3")
+
+    # Stage 4: Generate ledgers
+    inventory_to_ledger_script = Path(__file__).parent / "inventory_to_ledger.py"
+    if not inventory_to_ledger_script.exists():
+        print(f"\nℹ  Skipping Stage 4: inventory_to_ledger.py not found")
+    else:
+        # Create ledgers output directory
+        ledgers_output.mkdir(parents=True, exist_ok=True)
+
+        # Find all inventory files
+        inventory_files = list(inventory_output.rglob("*.inventory.yaml"))
+
+        print(f"\n{'=' * 70}")
+        print(f"Stage 4: Generate Ledgers")
+        print(f"{'=' * 70}")
+        print(f"Found {len(inventory_files)} inventory files\n")
+
+        # Check for project inventory
+        project_inventory_file = project_root / "project-inventory.txt"
+        if not project_inventory_file.exists():
+            project_inventory_file = None
+            print(f"Note: No project-inventory.txt found, integrations may be categorized as unknown\n")
+
+        for inventory_file in sorted(inventory_files):
+            rel_path = inventory_file.relative_to(inventory_output)
+            ledger_file = ledgers_output / rel_path.parent / f"{inventory_file.stem.replace('.inventory', '')}.ledger.yaml"
+            ledger_file.parent.mkdir(parents=True, exist_ok=True)
+
+            cmd = [
+                sys.executable,
+                str(inventory_to_ledger_script),
+                "--inventory", str(inventory_file),
+                "--output", str(ledger_file)
+            ]
+
+            if project_inventory_file:
+                cmd.extend(["--project-inventory", str(project_inventory_file)])
+
+            print(f"Processing: {rel_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                print(f"  ✗ Failed")
+                if result.stderr:
+                    print(result.stderr)
+            else:
+                print(f"  ✓ {ledger_file.relative_to(project_root)}")
+
+        print(f"\n✓ Completed: Stage 4")
 
     print(f"\n{'=' * 70}")
     print(f"✓ Analysis Complete!")
@@ -149,6 +235,8 @@ def analyze_project(
         print(f"  - Unit inspection: {inspect_output} (YAML)")
     print(f"  - EI enumeration:  {eis_output} (YAML)")
     print(f"  - Final inventory: {inventory_output} (YAML)")
+    if ledgers_output.exists():
+        print(f"  - Unit ledgers:    {ledgers_output} (YAML)")
     print()
 
     return True
@@ -163,6 +251,7 @@ Pipeline Stages:
   1. inspect_units.py        - Generate basic unit structure (optional)
   2. enumerate_exec_items.py - Enumerate execution items (EIs)
   3. enumerate_callables.py  - Classify integrations + merge EI data
+  4. inventory_to_ledger.py  - Generate three-document unit ledgers
 
 Example:
   %(prog)s /path/to/project --source-root src --output-root dist

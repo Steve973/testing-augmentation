@@ -6,11 +6,16 @@ Enumerates all execution items (EIs) in Python source code.
 Outputs YAML format for integration with pipeline.
 """
 
+from __future__ import annotations
+
 import argparse
 import ast
-import yaml
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+import yaml
+
+from models import Branch
 
 
 # ============================================================================
@@ -130,7 +135,14 @@ def decompose_match(stmt: ast.Match, source_lines: list[str]) -> list[str]:
     outcomes = []
     for i, case in enumerate(stmt.cases):
         pattern = ast.unparse(case.pattern)
-        outcomes.append(f"match case {i + 1}: {pattern}")
+
+        # Check if case body contains a return statement
+        has_return = any(isinstance(node, ast.Return) for node in case.body)
+
+        if has_return:
+            outcomes.append(f"match case {i + 1}: {pattern} → returns")
+        else:
+            outcomes.append(f"match case {i + 1}: {pattern}")
     return outcomes
 
 
@@ -149,6 +161,7 @@ def decompose_assignment(stmt: ast.Assign, source_lines: list[str]) -> list[str]
     Special cases:
     - List/dict/set comprehension: 2-3 EIs
     - Ternary expression: 4 EIs
+    - Function calls that can raise: 2+ EIs
     """
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
 
@@ -168,11 +181,20 @@ def decompose_assignment(stmt: ast.Assign, source_lines: list[str]) -> list[str]
     if isinstance(stmt.value, ast.IfExp):
         return decompose_ternary(stmt.value)
 
+    # Check if assignment contains calls that can raise
+    has_call, call_str = contains_call_that_can_raise(stmt.value)
+    if has_call and call_str:
+        return [
+            f"{call_str} succeeds → {line_text}",
+            f"{call_str} raises exception → exception propagates"
+        ]
+
     # Regular assignment
     return [f"executes: {line_text}"]
 
 
-def decompose_comprehension(comp: ast.comprehension, comp_type: str, empty_repr: str) -> list[str]:
+def decompose_comprehension(comp: ast.ListComp | ast.DictComp | ast.SetComp, comp_type: str, empty_repr: str) -> list[
+    str]:
     """Comprehension: 3 EIs with filter, 2 without."""
     has_filter = any(gen.ifs for gen in comp.generators)
 
@@ -187,6 +209,23 @@ def decompose_comprehension(comp: ast.comprehension, comp_type: str, empty_repr:
             f"{comp_type} comprehension: source empty → {empty_repr}",
             f"{comp_type} comprehension: source has items → populated"
         ]
+
+
+def contains_call_that_can_raise(node: ast.AST) -> tuple[bool, str | None]:
+    """
+    Check if an AST node contains function calls that can raise exceptions.
+
+    Returns:
+        (has_calls, call_description) - call_description is the unparsed call if found
+    """
+    # Walk the AST to find Call nodes
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            call_str = ast.unparse(child)
+            # Most function calls can potentially raise exceptions
+            # (We could be more selective here, but for now assume all can raise)
+            return True, call_str
+    return False, None
 
 
 def decompose_ternary(ifexp: ast.IfExp) -> list[str]:
@@ -215,9 +254,18 @@ def decompose_annassign(stmt: ast.AnnAssign, source_lines: list[str]) -> list[st
 
 
 def decompose_return(stmt: ast.Return, source_lines: list[str]) -> list[str]:
-    """Return statement: 1 EI."""
+    """Return statement: 1-2 EIs (may include exception path if contains call)."""
     if stmt.value:
         ret_val = ast.unparse(stmt.value)
+
+        # Check if return value contains calls that can raise
+        has_call, call_str = contains_call_that_can_raise(stmt.value)
+        if has_call and call_str:
+            return [
+                f"{call_str} succeeds → returns {ret_val}",
+                f"{call_str} raises exception → exception propagates"
+            ]
+
         return [f"returns {ret_val}"]
     else:
         return ["returns None"]
@@ -253,79 +301,88 @@ def decompose_continue(stmt: ast.Continue, source_lines: list[str]) -> list[str]
     return ["executes: continue"]
 
 
+def decompose_import(stmt: ast.Import, source_lines: list[str]) -> list[str]:
+    """Import statement: 1 EI."""
+    modules = ', '.join(alias.name for alias in stmt.names)
+    return [f"executes: import {modules}"]
+
+
+def decompose_importfrom(stmt: ast.ImportFrom, source_lines: list[str]) -> list[str]:
+    """ImportFrom statement: 1 EI."""
+    module = stmt.module or ""
+    names = ', '.join(alias.name for alias in stmt.names)
+    return [f"executes: from {module} import {names}"]
+
+
 def decompose_expr(stmt: ast.Expr, source_lines: list[str]) -> list[str]:
-    """Expression statement (usually function call): 1 EI."""
-    # Skip docstrings
+    """Expression statement: Usually 1 EI (unless it's a docstring or contains calls that raise)."""
+    # Skip docstrings (string literals as first statement)
     if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
-        return []
+        return []  # Docstrings don't create EIs
 
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
+
+    # Check if expression contains calls that can raise
+    has_call, call_str = contains_call_that_can_raise(stmt.value)
+    if has_call and call_str:
+        return [
+            f"{call_str} succeeds → continues",
+            f"{call_str} raises exception → exception propagates"
+        ]
+
     return [f"executes: {line_text}"]
 
 
 def decompose_global(stmt: ast.Global, source_lines: list[str]) -> list[str]:
-    """Global declaration: 1 EI (or skip as non-executable?)."""
+    """Global statement: 1 EI."""
     names = ', '.join(stmt.names)
     return [f"executes: global {names}"]
 
 
 def decompose_nonlocal(stmt: ast.Nonlocal, source_lines: list[str]) -> list[str]:
-    """Nonlocal declaration: 1 EI (or skip as non-executable?)."""
+    """Nonlocal statement: 1 EI."""
     names = ', '.join(stmt.names)
     return [f"executes: nonlocal {names}"]
 
 
 def decompose_asyncfor(stmt: ast.AsyncFor, source_lines: list[str]) -> list[str]:
-    """Async for loop: 2 EIs (0 iterations, ≥1 iterations)."""
-    target = ast.unparse(stmt.target)
-    iter_expr = ast.unparse(stmt.iter)
-
-    if stmt.orelse:
-        return [
-            f"async for {target} in {iter_expr}: 0 iterations → else executes",
-            f"async for {target} in {iter_expr}: completes without break → else executes",
-            f"async for {target} in {iter_expr}: breaks → else skipped"
-        ]
-    else:
-        return [
-            f"async for {target} in {iter_expr}: 0 iterations",
-            f"async for {target} in {iter_expr}: ≥1 iterations"
-        ]
+    """Async for loop: Same as regular for."""
+    return decompose_for(stmt, source_lines)  # type: ignore
 
 
 def decompose_asyncwith(stmt: ast.AsyncWith, source_lines: list[str]) -> list[str]:
-    """Async with statement: 2 EIs (enters successfully, raises on entry)."""
-    contexts = [ast.unparse(item.context_expr) for item in stmt.items]
-    context_str = ', '.join(contexts)
-    return [
-        f"async with {context_str}: enters successfully",
-        f"async with {context_str}: raises exception on entry"
-    ]
+    """Async with statement: Same as regular with."""
+    return decompose_with(stmt, source_lines)  # type: ignore
 
 
 def decompose_default(stmt: ast.stmt, source_lines: list[str]) -> list[str]:
-    """Default handler for unknown statement types."""
+    """Default decomposer for unknown statement types."""
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
     return [f"executes: {line_text}"]
 
 
-# ============================================================================
-# Dispatch Table
-# ============================================================================
-
-STATEMENT_DECOMPOSERS = {
-    # Control flow
+# Dispatch table mapping AST node types to decomposer functions
+STATEMENT_DECOMPOSERS: dict[type[ast.stmt], Callable[[ast.stmt, list[str]], list[str]]] = {  # type: ignore[dict-item]
+    # Conditionals
     ast.If: decompose_if,
+    ast.Match: decompose_match,
+
+    # Loops
     ast.For: decompose_for,
     ast.While: decompose_while,
+
+    # Exception handling
     ast.Try: decompose_try,
     ast.With: decompose_with,
-    ast.Match: decompose_match,
 
     # Assignments
     ast.Assign: decompose_assignment,
     ast.AugAssign: decompose_augassign,
     ast.AnnAssign: decompose_annassign,
+
+    # Imports
+    ast.Import: decompose_import,
+    ast.ImportFrom: decompose_importfrom,
 
     # Flow control
     ast.Return: decompose_return,
@@ -368,7 +425,7 @@ def decompose_statement(stmt: ast.stmt, source_lines: list[str]) -> list[str]:
 
 def get_all_statements(node: ast.AST) -> list[ast.stmt]:
     """Get all statements in an AST node, including nested ones."""
-    statements = []
+    statements: list[ast.stmt] = []
 
     for child in ast.walk(node):
         if isinstance(child, ast.stmt):
@@ -380,17 +437,42 @@ def get_all_statements(node: ast.AST) -> list[ast.stmt]:
     return statements
 
 
+# ============================================================================
+# Result structures
+# ============================================================================
+
+class FunctionResult:
+    """Result of EI enumeration for a single function."""
+
+    def __init__(self, name: str, line_start: int, line_end: int, branches: list[Branch]) -> None:
+        self.name = name
+        self.line_start = line_start
+        self.line_end = line_end
+        self.branches = branches
+        self.total_eis = len(branches)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for YAML output."""
+        return {
+            'name': self.name,
+            'line_start': self.line_start,
+            'line_end': self.line_end,
+            'total_eis': self.total_eis,
+            'branches': [b.to_dict() for b in self.branches]
+        }
+
+
 def enumerate_function_eis(
         func_node: ast.FunctionDef | ast.AsyncFunctionDef,
         source_lines: list[str],
         callable_id: str = "C000F001"
-) -> dict[str, Any]:
+) -> FunctionResult:
     """
     Enumerate all EIs in a function.
 
-    Returns outcome_map structure with EI IDs.
+    Returns FunctionResult with Branch objects.
     """
-    branches = []
+    branches: list[Branch] = []
     ei_counter = 1
 
     # Get all statements in the function (including nested)
@@ -419,29 +501,28 @@ def enumerate_function_eis(
                     condition = 'executes'
                     result = outcome.replace('executes: ', '')
 
-                branches.append({
-                    'id': ei_id,
-                    'line': stmt.lineno,
-                    'condition': condition,
-                    'outcome': result
-                })
+                branches.append(Branch(
+                    id=ei_id,
+                    line=stmt.lineno,
+                    condition=condition,
+                    outcome=result
+                ))
 
                 ei_counter += 1
 
-    return {
-        'function': func_node.name,
-        'line_start': func_node.lineno,
-        'line_end': func_node.end_lineno,
-        'branches': branches,
-        'total_eis': len(branches)
-    }
+    return FunctionResult(
+        name=func_node.name,
+        line_start=func_node.lineno,
+        line_end=func_node.end_lineno,
+        branches=branches
+    )
 
 
 # ============================================================================
 # File Processing
 # ============================================================================
 
-def enumerate_file(filepath: Path, function_name: str | None = None) -> list[dict]:
+def enumerate_file(filepath: Path, function_name: str | None = None) -> list[FunctionResult]:
     """Enumerate EIs for all functions in a file (or just one)."""
 
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -450,7 +531,7 @@ def enumerate_file(filepath: Path, function_name: str | None = None) -> list[dic
     source_lines = source.split('\n')
     tree = ast.parse(source)
 
-    results = []
+    results: list[FunctionResult] = []
     func_counter = 1
 
     # Walk the AST to find all functions
@@ -471,38 +552,29 @@ def enumerate_file(filepath: Path, function_name: str | None = None) -> list[dic
     return results
 
 
-def format_for_yaml(results: list[dict]) -> dict:
+def format_for_yaml(results: list[FunctionResult]) -> dict[str, Any]:
     """Format results as dict for YAML output."""
     if not results:
         return {}
 
     return {
         'module': "unknown",
-        'functions': [
-            {
-                'name': r['function'],
-                'line_start': r['line_start'],
-                'line_end': r['line_end'],
-                'total_eis': r['total_eis'],
-                'branches': r['branches']  # Now with EI IDs, condition, outcome
-            }
-            for r in results
-        ]
+        'functions': [r.to_dict() for r in results]
     }
 
 
-def format_outcome_map_text(result: dict) -> str:
+def format_outcome_map_text(result: FunctionResult) -> str:
     """Format the branches for display."""
-    lines = []
-    lines.append(f"=== {result['function']} (lines {result['line_start']}-{result['line_end']}) ===")
-    lines.append(f"Total EIs: {result['total_eis']}")
+    lines: list[str] = []
+    lines.append(f"=== {result.name} (lines {result.line_start}-{result.line_end}) ===")
+    lines.append(f"Total EIs: {result.total_eis}")
     lines.append("")
     lines.append("Execution Items:")
 
-    for branch in result['branches']:
-        lines.append(f"\n{branch['id']} (Line {branch['line']}):")
-        lines.append(f"  Condition: {branch['condition']}")
-        lines.append(f"  Outcome: {branch['outcome']}")
+    for branch in result.branches:
+        lines.append(f"\n{branch.id} (Line {branch.line}):")
+        lines.append(f"  Condition: {branch.condition}")
+        lines.append(f"  Outcome: {branch.outcome}")
 
     return '\n'.join(lines)
 
@@ -511,7 +583,7 @@ def format_outcome_map_text(result: dict) -> str:
 # CLI
 # ============================================================================
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description='Enumerate Execution Items (EIs) from Python source',
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -2,28 +2,58 @@
 """
 Extract all types (classes and functions) from a Python project.
 
+Generates project-inventory.txt for use in integration categorization.
+
 Usage:
-    python extract_project_types.py <project_root> [--output <file>]
+    python inspect_units.py <project_root> --source-root <src> --output-root <o>
 
 Example:
-    python extract_project_types.py ./src
-    python extract_project_types.py ./src --output PROJECT_TYPES.txt
+    python inspect_units.py . --source-root src --output-root dist/inspect
 """
 
+import argparse
 import ast
 import sys
 from pathlib import Path
 from typing import List, Set
 
 
-def get_module_name_from_path(filepath: Path, project_root: Path) -> str:
+# Directories to exclude from scanning
+EXCLUDED_DIRS = {
+    '.venv',
+    'venv',
+    '__pycache__',
+    '.git',
+    '.idea',
+    '.vscode',
+    'node_modules',
+    'build',
+    'dist',
+    '.pytest_cache',
+    '.mypy_cache',
+    '.tox',
+    'eggs',
+    '.eggs',
+}
+
+
+def should_skip_path(path: Path) -> bool:
+    """Check if a path should be skipped during scanning."""
+    # Skip if any parent directory is in excluded list
+    for part in path.parts:
+        if part in EXCLUDED_DIRS:
+            return True
+    return False
+
+
+def get_module_name_from_path(filepath: Path, source_root: Path) -> str:
     """
     Convert a file path to a module name.
 
     Example:
         /path/to/src/project/model/keys.py -> project.model.keys
     """
-    relative = filepath.relative_to(project_root)
+    relative = filepath.relative_to(source_root)
     parts = list(relative.parts[:-1]) + [relative.stem]
 
     # Remove __init__ from module name
@@ -33,7 +63,7 @@ def get_module_name_from_path(filepath: Path, project_root: Path) -> str:
     return ".".join(parts)
 
 
-def extract_types_from_file(filepath: Path, project_root: Path) -> List[str]:
+def extract_types_from_file(filepath: Path, source_root: Path) -> List[str]:
     """
     Extract all class and function definitions from a Python file.
     Returns fully qualified names.
@@ -47,7 +77,7 @@ def extract_types_from_file(filepath: Path, project_root: Path) -> List[str]:
         print(f"Warning: Could not parse {filepath}: {e}", file=sys.stderr)
         return []
 
-    module_name = get_module_name_from_path(filepath, project_root)
+    module_name = get_module_name_from_path(filepath, source_root)
     types = []
 
     def visit_node(node, parent_name=None):
@@ -86,68 +116,95 @@ def extract_types_from_file(filepath: Path, project_root: Path) -> List[str]:
     return types
 
 
-def extract_all_types(project_root: Path) -> Set[str]:
+def extract_all_types(source_root: Path) -> Set[str]:
     """
-    Extract all types from all Python files in the project.
+    Extract all types from all Python files in the source root.
     Returns a set of fully qualified type names.
     """
     all_types = set()
 
-    if not project_root.exists():
-        print(f"Error: Project root '{project_root}' does not exist", file=sys.stderr)
+    if not source_root.exists():
+        print(f"Error: Source root '{source_root}' does not exist", file=sys.stderr)
         sys.exit(1)
 
-    if not project_root.is_dir():
-        print(f"Error: Project root '{project_root}' is not a directory", file=sys.stderr)
+    if not source_root.is_dir():
+        print(f"Error: Source root '{source_root}' is not a directory", file=sys.stderr)
         sys.exit(1)
 
-    python_files = list(project_root.rglob("*.py"))
+    # Find all Python files, filtering out excluded directories
+    python_files = [
+        f for f in source_root.rglob("*.py")
+        if not should_skip_path(f) and f.name != "__init__.py"
+    ]
 
     if not python_files:
-        print(f"Warning: No Python files found in '{project_root}'", file=sys.stderr)
+        print(f"Warning: No Python files found in '{source_root}'", file=sys.stderr)
+        return all_types
 
-    print(f"Scanning {len(python_files)} Python files...", file=sys.stderr)
+    print(f"Scanning {len(python_files)} Python files...")
 
     for py_file in python_files:
-        types = extract_types_from_file(py_file, project_root)
+        types = extract_types_from_file(py_file, source_root)
         all_types.update(types)
 
     return all_types
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ["-h", "--help"]:
-        print(__doc__)
-        sys.exit(0)
+    parser = argparse.ArgumentParser(
+        description="Extract all types from a Python project for integration categorization",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example:
+  %(prog)s /path/to/project --source-root src --output-root dist/inspect
+        """
+    )
 
-    project_root = Path(sys.argv[1])
-    output_file = None
+    parser.add_argument(
+        'project_root',
+        type=Path,
+        help='Project root directory'
+    )
+    parser.add_argument(
+        '--source-root',
+        type=str,
+        default='src',
+        help='Source root relative to project root (default: "src")'
+    )
+    parser.add_argument(
+        '--output-root',
+        type=str,
+        default='dist/inspect',
+        help='Output root relative to project root (default: "dist/inspect")'
+    )
 
-    # Parse optional --output argument
-    if len(sys.argv) >= 4 and sys.argv[2] == "--output":
-        output_file = Path(sys.argv[3])
-    elif len(sys.argv) >= 3 and sys.argv[2] == "--output":
-        print("Error: --output requires a filename", file=sys.stderr)
+    args = parser.parse_args()
+
+    project_root = args.project_root.absolute()
+    source_root = project_root / args.source_root
+
+    if not source_root.exists():
+        print(f"Error: Source root not found: {source_root}", file=sys.stderr)
         sys.exit(1)
 
     # Extract types
-    all_types = extract_all_types(project_root)
+    all_types = extract_all_types(source_root)
 
     # Sort for consistent output
     sorted_types = sorted(all_types)
 
-    print(f"Found {len(sorted_types)} types", file=sys.stderr)
+    print(f"Found {len(sorted_types)} types")
 
-    # Output results
-    if output_file:
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for type_name in sorted_types:
-                f.write(f"{type_name}\n")
-        print(f"Wrote types to {output_file}", file=sys.stderr)
-    else:
-        # Print to stdout
+    # Output to project-inventory.txt in output-root
+    output_root = project_root / args.output_root
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_file = output_root / "project-inventory.txt"
+
+    with open(output_file, 'w', encoding='utf-8') as f:
         for type_name in sorted_types:
-            print(type_name)
+            f.write(f"{type_name}\n")
+
+    print(f"Wrote project inventory to {output_file}")
 
 
 if __name__ == "__main__":
