@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import yaml
 
+from callable_id_generation import generate_function_id, generate_ei_id
 from models import Branch
 
 
@@ -316,13 +317,13 @@ def decompose_importfrom(stmt: ast.ImportFrom, source_lines: list[str]) -> list[
 
 def decompose_expr(stmt: ast.Expr, source_lines: list[str]) -> list[str]:
     """Expression statement: Usually 1 EI (unless it's a docstring or contains calls that raise)."""
-    # Skip docstrings (string literals as first statement)
+    # Skip docstrings (string literals as the first statement)
     if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
         return []  # Docstrings don't create EIs
 
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
 
-    # Check if expression contains calls that can raise
+    # Check if the expression contains calls that can raise
     has_call, call_str = contains_call_that_can_raise(stmt.value)
     if has_call and call_str:
         return [
@@ -465,7 +466,7 @@ class FunctionResult:
 def enumerate_function_eis(
         func_node: ast.FunctionDef | ast.AsyncFunctionDef,
         source_lines: list[str],
-        callable_id: str = "C000F001"
+        callable_id
 ) -> FunctionResult:
     """
     Enumerate all EIs in a function.
@@ -492,7 +493,7 @@ def enumerate_function_eis(
 
         if outcomes:  # Skip empty (like docstrings)
             for outcome in outcomes:
-                ei_id = f"{callable_id}E{ei_counter:04d}"
+                ei_id = generate_ei_id(callable_id, ei_counter)
 
                 # Split outcome into condition and result
                 if ' → ' in outcome:
@@ -501,12 +502,14 @@ def enumerate_function_eis(
                     condition = 'executes'
                     result = outcome.replace('executes: ', '')
 
-                branches.append(Branch(
-                    id=ei_id,
-                    line=stmt.lineno,
-                    condition=condition,
-                    outcome=result
-                ))
+                branches.append(
+                    Branch(
+                        id=ei_id,
+                        line=stmt.lineno,
+                        condition=condition,
+                        outcome=result
+                    )
+                )
 
                 ei_counter += 1
 
@@ -522,7 +525,7 @@ def enumerate_function_eis(
 # File Processing
 # ============================================================================
 
-def enumerate_file(filepath: Path, function_name: str | None = None) -> list[FunctionResult]:
+def enumerate_file(filepath: Path, unit_id: str, function_name: str | None = None) -> list[FunctionResult]:
     """Enumerate EIs for all functions in a file (or just one)."""
 
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -541,8 +544,8 @@ def enumerate_file(filepath: Path, function_name: str | None = None) -> list[Fun
             if function_name and node.name != function_name:
                 continue
 
-            # Generate callable ID (simplified - just C000F### for now)
-            callable_id = f"C000F{func_counter:03d}"
+            # Generate callable ID using provided unit_id
+            callable_id = generate_function_id(unit_id, func_counter)
 
             result = enumerate_function_eis(node, source_lines, callable_id)
             results.append(result)
@@ -601,6 +604,7 @@ Examples:
     )
 
     parser.add_argument('file', type=Path, help='Python source file')
+    parser.add_argument('--unit-id', '-u', required=True, help='Unit ID (required)')
     parser.add_argument('--function', '-f', help='Specific function name to enumerate')
     parser.add_argument('--text', action='store_true', help='Output human-readable text instead of YAML')
     parser.add_argument('--output', '-o', type=Path, help='Save output to file')
@@ -612,7 +616,7 @@ Examples:
         return 1
 
     # Enumerate
-    results = enumerate_file(args.file, args.function)
+    results = enumerate_file(args.file, args.unit_id, args.function)
 
     if not results:
         if args.function:

@@ -150,6 +150,7 @@ class IntegrationType(str, Enum):
 class IntegrationCategory(str, Enum):
     """Category of integration after classification."""
     INTERUNIT = 'interunit'
+    STDLIB = 'stdlib'
     EXTLIB = 'extlib'
     BOUNDARY = 'boundaries'
     UNKNOWN = 'unknown'
@@ -375,14 +376,32 @@ class CallableEntry:
         """
         categorized: dict[IntegrationCategory, list[dict[str, Any]]] = {
             IntegrationCategory.INTERUNIT: [],
+            IntegrationCategory.STDLIB: [],
             IntegrationCategory.EXTLIB: [],
             IntegrationCategory.BOUNDARY: [],
             IntegrationCategory.UNKNOWN: []
         }
 
         for candidate in self.integration_candidates:
+            # Check if this is actually an integration (not a non-integration)
+            if self._is_non_integration(candidate.target):
+                continue  # Skip non-integrations entirely
+
             category = self._determine_category(candidate.target, project_types)
             fact = candidate.to_ledger_integration_fact()
+
+            # Add boundary details if it's a boundary integration
+            if category == IntegrationCategory.BOUNDARY:
+                boundary_info = self._get_boundary_info(candidate.target)
+                if boundary_info:
+                    fact['boundary'] = {
+                        'kind': boundary_info['kind']
+                    }
+                    if 'operation' in boundary_info:
+                        fact['boundary']['operation'] = boundary_info['operation']
+                    if 'protocol' in boundary_info:
+                        fact['boundary']['protocol'] = boundary_info['protocol']
+
             categorized[category].append(fact)
 
         # Remove empty categories and convert enum keys to strings
@@ -393,45 +412,234 @@ class CallableEntry:
         }
 
     def _determine_category(self, target: str, project_types: set[str]) -> IntegrationCategory:
-        """Determine integration category."""
-        # Check if the target is in the project
-        if target in project_types:
-            return IntegrationCategory.INTERUNIT
+        """
+        Determine integration category.
 
-        # Check for boundary indicators (operations that cross system boundaries)
-        boundary_indicators: list[str] = [
-            'open', 'requests.', 'urllib.', 'http.client.',
-            'os.getenv', 'os.environ',
-            'datetime.now', 'time.time', 'time.sleep',
-            'random.', 'subprocess.',
-            'socket.', 'http.',
-        ]
-        if any(indicator in target for indicator in boundary_indicators):
+        Priority order:
+        1. Boundary operations (crosses system boundary)
+        2. Project types (interunit)
+        3. Standard library (stdlib)
+        4. Known third-party libraries (extlib)
+        5. Unknown (can't determine)
+        """
+
+        # 1. BOUNDARY OPERATIONS - highest priority
+        # Check knowledge_base for known boundary operations
+        boundary_info = self._get_boundary_info(target)
+        if boundary_info:
             return IntegrationCategory.BOUNDARY
 
-        # Check for stdlib patterns (heuristic)
-        stdlib_patterns: list[str] = [
-            'json.', 'os.', 'sys.', 're.', 'math.',
-            'collections.', 'itertools.', 'functools.',
-            'pathlib.', 'typing.', 'dataclasses.',
-            'Path', 'Path.', 'Path(',  # pathlib.Path
-        ]
-        if any(pattern in target for pattern in stdlib_patterns):
+        # 2. PROJECT TYPES - check if it's from the project
+        if self._is_project_type(target, project_types):
+            return IntegrationCategory.INTERUNIT
+
+        # 3. STDLIB - check if it's Python standard library
+        if self._is_stdlib_call(target):
+            return IntegrationCategory.STDLIB
+
+        # 4. KNOWN THIRD-PARTY LIBRARIES
+        if self._is_known_third_party(target):
             return IntegrationCategory.EXTLIB
 
-        # Common third-party libraries that should be extlib
-        extlib_packages: list[str] = [
-            'tomli.', 'tomli_w.',  # TOML libraries
-            'yaml.', 'pyyaml.',  # YAML libraries
-            'lxml.', 'bs4.',  # XML/HTML parsing
-            'numpy.', 'pandas.',  # Data science
-            'pytest.', 'unittest.',  # Testing
-        ]
-        if any(pkg in target for pkg in extlib_packages):
-            return IntegrationCategory.EXTLIB
-
-        # Cannot determine - mark as unknown
+        # 5. UNKNOWN - can't determine
         return IntegrationCategory.UNKNOWN
+
+    def _is_non_integration(self, target: str) -> bool:
+        """
+        Check if target should be filtered out (not an actual integration).
+
+        Returns True if this is NOT an integration point.
+        """
+        # Import knowledge_base items
+        try:
+            from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
+        except ImportError:
+            # Fallback to minimal set if knowledge_base not available
+            PYTHON_BUILTINS = {
+                'sorted', 'str', 'len', 'isinstance', 'type', 'int', 'float',
+                'bool', 'list', 'dict', 'set', 'tuple', 'repr', 'abs', 'all',
+                'any', 'enumerate', 'filter', 'map', 'zip', 'range', 'sum',
+                'min', 'max', 'iter', 'next', 'hasattr', 'getattr', 'setattr'
+            }
+            BUILTIN_METHODS = {
+                'items', 'keys', 'values', 'get', 'append', 'extend',
+                'split', 'join', 'strip', 'lower', 'upper'
+            }
+
+        # Get base name (last part after final dot)
+        parts = target.split('.')
+        base_name = parts[-1].split('(')[0]  # Remove any parentheses
+
+        # 1. Python builtins (language constructs)
+        if base_name in PYTHON_BUILTINS:
+            return True
+
+        # 2. Common builtin methods that are never integrations
+        # (these are dict/list/set methods that are just data structure operations)
+        if base_name in BUILTIN_METHODS:
+            return True
+
+        # 3. Recursive call - function calling itself
+        # Check if target matches the callable's own name
+        if target == self.name or target.endswith(f'.{self.name}'):
+            return True
+
+        # 4. Self methods - ALWAYS filter out self.* calls
+        # These are calls within the same class, not integration points
+        if target.startswith('self.'):
+            return True
+
+        # 5. cls methods - ALWAYS filter out cls.* calls
+        # These are class method calls within the same class
+        if target.startswith('cls.'):
+            return True
+
+        return False
+
+    @staticmethod
+    def _get_boundary_info(target: str) -> dict[str, Any] | None:
+        """
+        Get boundary information if this crosses a system boundary.
+
+        Returns:
+            dict with 'kind', 'operation', 'protocol' etc, or None if not a boundary
+        """
+        # Try importing knowledge_base for comprehensive boundary detection
+        try:
+            from knowledge_base import BOUNDARY_OPERATIONS
+
+            # Direct lookup in knowledge_base
+            if target in BOUNDARY_OPERATIONS:
+                return BOUNDARY_OPERATIONS[target]
+        except ImportError:
+            pass
+
+        # Pattern matching for common boundary patterns
+
+        # Filesystem operations
+        if 'Path.read_text' in target or '.read_text' in target:
+            return {'kind': 'filesystem', 'operation': 'read'}
+        if 'Path.write_text' in target or '.write_text' in target:
+            return {'kind': 'filesystem', 'operation': 'write'}
+        if 'Path.mkdir' in target or '.mkdir' in target:
+            return {'kind': 'filesystem', 'operation': 'write'}
+        if 'Path.unlink' in target or '.unlink' in target:
+            return {'kind': 'filesystem', 'operation': 'write'}
+        if 'Path.open' in target or target.startswith('open('):
+            return {'kind': 'filesystem', 'operation': 'read/write'}
+        if '.as_posix' in target:
+            return {'kind': 'filesystem', 'operation': 'access'}
+
+        # Network operations
+        if 'requests.get' in target:
+            return {'kind': 'network', 'protocol': 'http', 'operation': 'read'}
+        if 'requests.post' in target or 'requests.put' in target:
+            return {'kind': 'network', 'protocol': 'http', 'operation': 'write'}
+        if 'requests.delete' in target:
+            return {'kind': 'network', 'protocol': 'http', 'operation': 'delete'}
+        if 'requests.' in target:
+            return {'kind': 'network', 'protocol': 'http', 'operation': 'request'}
+        if 'urllib.request' in target or 'urllib.urlopen' in target:
+            return {'kind': 'network', 'protocol': 'http', 'operation': 'request'}
+
+        # Environment operations
+        if 'os.getenv' in target or 'os.environ' in target:
+            return {'kind': 'env', 'operation': 'read'}
+
+        # Clock/time operations
+        if 'datetime.now' in target or 'datetime.utcnow' in target or 'datetime.today' in target:
+            return {'kind': 'clock', 'operation': 'read'}
+        if 'time.time' in target or 'time.monotonic' in target or 'time.perf_counter' in target:
+            return {'kind': 'clock', 'operation': 'read'}
+        if 'time.sleep' in target:
+            return {'kind': 'clock', 'operation': 'sleep'}
+
+        # Randomness operations
+        if target.startswith('random.') or '.random.' in target:
+            return {'kind': 'randomness', 'operation': 'generate'}
+
+        # Subprocess operations
+        if 'subprocess.run' in target or 'subprocess.call' in target or 'subprocess.Popen' in target:
+            return {'kind': 'subprocess', 'operation': 'execute'}
+
+        # Database operations
+        if 'cursor.execute' in target or '.execute(' in target:
+            return {'kind': 'database', 'operation': 'query'}
+        if 'sqlite3.connect' in target or '.connect(' in target:
+            return {'kind': 'database', 'operation': 'connect'}
+
+        return None
+
+    @staticmethod
+    def _is_project_type(target: str, project_types: set[str]) -> bool:
+        """
+        Check if target is from project inventory.
+        """
+        # Direct match
+        if target in project_types:
+            return True
+
+        # Check if target is a method/attribute of a project type
+        # e.g., target="MyClass.method" matches project_type="module.MyClass"
+        for project_type in project_types:
+            if target.startswith(project_type + '.'):
+                return True
+            # Also check if project_type is more specific
+            if project_type.startswith(target + '.'):
+                return True
+
+        return False
+
+    @staticmethod
+    def _is_stdlib_call(target: str) -> bool:
+        """
+        Check if target is from Python standard library.
+        """
+        # Try importing knowledge_base
+        try:
+            from knowledge_base import is_stdlib_module
+
+            # Extract module name
+            parts = target.split('.')
+            if not parts:
+                return False
+
+            module_name = parts[0]
+            return is_stdlib_module(module_name)
+        except ImportError:
+            pass
+
+        # Fallback: common stdlib modules
+        parts = target.split('.')
+        if not parts:
+            return False
+
+        module_name = parts[0]
+
+        stdlib_modules = {
+            'json', 'os', 'sys', 're', 'math', 'collections',
+            'itertools', 'functools', 'pathlib', 'typing',
+            'dataclasses', 'datetime', 'time', 'hashlib',
+            'hmac', 'base64', 'binascii', 'struct', 'pickle',
+            'csv', 'xml', 'html', 'email', 'urllib', 'http'
+        }
+
+        return module_name in stdlib_modules
+
+    def _is_known_third_party(self, target: str) -> bool:
+        """
+        Check if target is from known third-party libraries.
+        """
+        third_party_prefixes = [
+            'tomli.', 'tomli_w.',  # TOML
+            'yaml.', 'pyyaml.',  # YAML
+            'lxml.', 'bs4.',  # XML/HTML
+            'numpy.', 'pandas.',  # Data science
+            'pytest.', 'requests.',  # Testing/HTTP
+            'aiohttp.', 'httpx.',  # Async HTTP
+        ]
+
+        return any(target.startswith(prefix) for prefix in third_party_prefixes)
 
     def to_ledger_callable_spec(self, project_types: set[str]) -> dict[str, Any]:
         """

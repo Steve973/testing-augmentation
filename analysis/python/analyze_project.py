@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from callable_id_generation import generate_unit_id
+
 
 def run_command(cmd: list[str], description: str, log_dir: Path = Path("/tmp/ledger")) -> bool:
     """Run a command and return success status."""
@@ -39,6 +41,24 @@ def run_command(cmd: list[str], description: str, log_dir: Path = Path("/tmp/led
     print(f"\n✓ Completed: {description}")
     print(f"   Log: {log_file}")
     return True
+
+
+def derive_fqn(filepath: Path, source_root: Path) -> str:
+    """Derive fully qualified name from filepath."""
+    try:
+        relative = filepath.relative_to(source_root)
+    except ValueError:
+        # If the filepath is not relative to source_root, use absolute
+        relative = filepath
+
+    # Remove .py extension and convert path separators to dots
+    fqn = str(relative.with_suffix('')).replace('/', '.').replace('\\', '.')
+
+    # Remove __init__ if present
+    if fqn.endswith('.__init__'):
+        fqn = fqn[:-9]
+
+    return fqn
 
 
 def analyze_project(
@@ -104,7 +124,7 @@ def analyze_project(
     eis_output.mkdir(parents=True, exist_ok=True)
 
     # Find all Python files
-    py_files = list((source_path).rglob("*.py"))
+    py_files = list(source_path.rglob("*.py"))
     py_files = [f for f in py_files if f.name != "__init__.py"]
 
     print(f"\n{'=' * 70}")
@@ -121,6 +141,7 @@ def analyze_project(
             sys.executable,
             str(enumerate_eis_script),
             str(py_file),
+            "--unit-id", generate_unit_id(derive_fqn(py_file, source_path)),
             "--output", str(output_file)
         ]
 
@@ -150,9 +171,8 @@ def analyze_project(
     print(f"Processing {len(py_files)} Python files\n")
 
     for py_file in sorted(py_files):
-        # Derive FQN from file path
         rel_path = py_file.relative_to(source_path)
-        fqn = str(rel_path.with_suffix('')).replace('/', '.').replace('\\', '.')
+        fqn = derive_fqn(py_file, source_path)
         if fqn.endswith('.__init__'):
             fqn = fqn[:-9]
 
@@ -161,6 +181,7 @@ def analyze_project(
             str(enumerate_callables_script),
             "--file", str(py_file),
             "--fqn", fqn,
+            "--unit-id", generate_unit_id(fqn),
             "--output-root", str(inventory_output),
             "--ei-root", str(eis_output)
         ]
@@ -195,7 +216,7 @@ def analyze_project(
         print(f"Found {len(inventory_files)} inventory files\n")
 
         # Check for project inventory
-        project_inventory_file = project_root / "project-inventory.txt"
+        project_inventory_file = inspect_output / "project-inventory.txt"
         if not project_inventory_file.exists():
             project_inventory_file = None
             print(f"Note: No project-inventory.txt found, integrations may be categorized as unknown\n")

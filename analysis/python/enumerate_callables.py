@@ -5,12 +5,18 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import sys
-import yaml
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from callable_id_generation import (
+    generate_class_id,
+    generate_function_id,
+    generate_nested_function_id,
+    generate_method_id, generate_nested_class_id
+)
 from models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
 
 
@@ -240,12 +246,9 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         self.source = source
         self.unit_id = unit_id
         self.source_lines = source.split('\n')
-
         self.function_counter = 0
         self.class_counter = 0
-        self.nested_counter = 0
         self.method_counters: dict[str, int] = {}
-
         self.context_stack: list[str] = [unit_id]  # Track current nesting: [unit_id, class_id, method_id, ...]
         self.entries: list[CallableEntry] = []  # Store CallableEntry objects
 
@@ -257,10 +260,10 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         # Generate class ID based on nesting depth
         if parent_id == self.unit_id:
             # Top-level class
-            class_id = f"{self.unit_id}_C{self.class_counter:03d}"
+            class_id = generate_class_id(self.unit_id, self.class_counter)
         else:
             # Nested class - append to parent
-            class_id = f"{parent_id}_C{self.class_counter:03d}"
+            class_id = generate_nested_class_id(parent_id, self.class_counter)
 
         # Check if this is an enum
         is_enum = any(
@@ -299,7 +302,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         """Visit a method inside a class."""
         self.method_counters[parent_id] += 1
         method_num = self.method_counters[parent_id]
-        method_id = f"{parent_id}_M{method_num:03d}"
+        method_id = generate_method_id(parent_id, method_num)
 
         # Analyze this method as a callable
         entry = self._analyze_callable(node, method_id, is_method=True)
@@ -312,19 +315,17 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         # Check for nested functions
         self.context_stack.append(method_id)
-        nested_counter = 0
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 # This is a nested function
-                nested_counter += 1
                 self._visit_nested_function(item, method_id)
         self.context_stack.pop()
 
     def _visit_nested_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, parent_id: str) -> None:
         """Visit a nested function."""
         # Generate nested function ID
-        nested_id = f"{parent_id}_N{self.nested_counter:03d}"
-        self.nested_counter += 1
+        self.function_counter += 1
+        nested_id = generate_nested_function_id(parent_id, self.function_counter)
 
         # Analyze as callable
         entry = self._analyze_callable(node, nested_id, is_method=False)
@@ -348,14 +349,12 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             return  # Inside a class, handled by _visit_method
 
         self.function_counter += 1
-        func_id = f"{self.unit_id}_F{self.function_counter:03d}"
-
+        func_id = generate_function_id(self.unit_id, self.function_counter)
         entry = self._analyze_callable(node, func_id, is_method=False)
         self.entries.append(entry)
 
         # Check for nested functions
         self.context_stack.append(func_id)
-        self.nested_counter = 0
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 self._visit_nested_function(item, func_id)
@@ -370,14 +369,13 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             return
 
         self.function_counter += 1
-        func_id = f"{self.unit_id}_F{self.function_counter:03d}"
+        func_id = generate_function_id(self.unit_id, self.function_counter)
 
         entry = self._analyze_callable(node, func_id, is_method=False)
         self.entries.append(entry)
 
         # Check for nested functions
         self.context_stack.append(func_id)
-        self.nested_counter = 0
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 self._visit_nested_function(item, func_id)
@@ -450,6 +448,14 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             if sig_line.endswith(':'):
                 sig_line = sig_line[:-1].strip()
 
+            # Normalize whitespace (collapse multiple spaces to single space)
+            import re
+            sig_line = re.sub(r'\s+', ' ', sig_line)
+            sig_line = (sig_line
+                        .replace('  ', ' ')
+                        .replace('( ', '(')
+                        .replace(' )', ')')
+                        .replace(' ,', ','))
             return sig_line
         except Exception:
             # Fallback to unparsing
@@ -482,13 +488,23 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         """Extract operation metadata decorators from comments."""
         decorators: list[dict[str, Any]] = []
 
-        # Check single-line comment before function
+        # Scan upward from line before function/first decorator
         if node.lineno > 1:
-            prev_line = self.source_lines[node.lineno - 2].strip()
-            if prev_line.startswith('#') and '::' in prev_line:
-                decorator = self._parse_decorator_comment(prev_line)
-                if decorator:
-                    decorators.append(decorator)
+            # Start from line before the function/first decorator
+            for line_idx in range(node.lineno - 2, -1, -1):  # -2 because lineno is 1-indexed, -1 to go before
+                line = self.source_lines[line_idx].strip()
+
+                # If it's an operation metadata decorator comment, grab it
+                if line.startswith('#') and '::' in line:
+                    decorator = self._parse_decorator_comment(line)
+                    if decorator:
+                        decorators.append(decorator)
+                # If it's a Python decorator, continue (we'll skip it)
+                elif line.startswith('@'):
+                    continue
+                # Stop at anything else (blank line, code, other comment, top of file)
+                else:
+                    break
 
         # Check docstring for decorators
         if (node.body and
@@ -644,17 +660,6 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             return None
 
 
-# ============================================================================
-# ID Generation
-# ============================================================================
-
-def generate_unit_id(fully_qualified_name: str) -> str:
-    """Generate a unique unit ID from FQN."""
-    # Use first 10 chars of SHA256 hash
-    hash_obj = hashlib.sha256(fully_qualified_name.encode())
-    return f"U{hash_obj.hexdigest()[:10].upper()}"
-
-
 def derive_fqn(filepath: Path, source_root: Path) -> str:
     """Derive fully qualified name from filepath."""
     try:
@@ -680,6 +685,7 @@ def derive_fqn(filepath: Path, source_root: Path) -> str:
 def process_file(
         filepath: Path,
         fqn: str,
+        unit_id: str,
         output_root: Path,
         ei_root: Path | None = None
 ) -> dict[str, Any]:
@@ -688,9 +694,6 @@ def process_file(
     # Read source
     with open(filepath, 'r', encoding='utf-8') as f:
         source = f.read()
-
-    # Generate unit ID
-    unit_id = generate_unit_id(fqn)
 
     # Parse AST
     try:
@@ -823,6 +826,7 @@ def main() -> int:
 
     parser.add_argument('--file', type=Path, required=True, help='Python source file')
     parser.add_argument('--fqn', type=str, required=True, help='Fully qualified name')
+    parser.add_argument('--unit-id', type=str, required=True, help='Unique ID for unit')
     parser.add_argument('--output-root', type=Path, default=Path('dist/inventory'),
                         help='Root directory for inventory output')
     parser.add_argument('--ei-root', type=Path, help='Root directory containing EI YAML files')
@@ -836,7 +840,7 @@ def main() -> int:
     print(f"Processing: {args.file}")
     print(f"  → FQN: {args.fqn}")
 
-    process_file(args.file, args.fqn, args.output_root, args.ei_root)
+    process_file(args.file, args.fqn, args.unit_id, args.output_root, args.ei_root)
 
     return 0
 

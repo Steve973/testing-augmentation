@@ -169,6 +169,7 @@ def generate_review_doc(
     integration_counts: dict[IntegrationCategory, int] = {
         IntegrationCategory.INTERUNIT: 0,
         IntegrationCategory.EXTLIB: 0,
+        IntegrationCategory.STDLIB: 0,
         IntegrationCategory.BOUNDARY: 0,
         IntegrationCategory.UNKNOWN: 0
     }
@@ -225,6 +226,7 @@ def generate_review_doc(
             'totalExeItems': str(total_eis),
             'interunitIntegrations': str(integration_counts[IntegrationCategory.INTERUNIT]),
             'extlibIntegrations': str(integration_counts[IntegrationCategory.EXTLIB]),
+            'stdlibIntegrations': str(integration_counts[IntegrationCategory.STDLIB]),
             'boundaryIntegrations': str(integration_counts[IntegrationCategory.BOUNDARY])
         },
         'findings': findings
@@ -313,6 +315,7 @@ def transform_inventory_to_ledger(
     print(f"  Total EIs: {doc3['unit']['totalExeItems']}")
     print(f"  Integrations: {doc3['unit']['interunitIntegrations']} interunit, "
           f"{doc3['unit']['extlibIntegrations']} extlib, "
+          f"{doc3['unit']['stdlibIntegrations']} stdlib, "
           f"{doc3['unit']['boundaryIntegrations']} boundary")
     if doc3['findings']:
         print(f"  Findings: {len(doc3['findings'])}")
