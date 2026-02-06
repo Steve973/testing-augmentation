@@ -166,30 +166,26 @@ def extract_integration_facts(ledger_doc: dict[str, Any]) -> list[dict[str, Any]
         if not integration or not isinstance(integration, dict):
             continue
 
-        # Extract interunit facts
-        interunit = integration.get('interunit', [])
-        if isinstance(interunit, list):
-            for fact in interunit:
-                if isinstance(fact, dict):
-                    facts.append({
-                        **fact,
-                        'sourceUnit': unit_name,
-                        'sourceCallableId': callable_id,
-                        'sourceCallableName': callable_name,
-                        'integrationKind': 'interunit'
-                    })
+        # Extract all integration fact categories
+        categories = {
+            'interunit': 'interunit',
+            'stdlib': 'stdlib',
+            'extlib': 'extlib',
+            'unknown': 'unknown',
+            'boundaries': 'boundary'
+        }
 
-        # Extract boundary facts
-        boundaries = integration.get('boundaries', [])
-        if isinstance(boundaries, list):
-            for fact in boundaries:
-                if isinstance(fact, dict):
-                    facts.append({
-                        **fact,
-                        'sourceUnit': unit_name,
-                        'sourceCallableId': callable_id,
-                        'sourceCallableName': callable_name,
-                        'integrationKind': 'boundary'
-                    })
+        for category_key, integration_kind in categories.items():
+            facts_list = integration.get(category_key, [])
+            if isinstance(facts_list, list):
+                for fact in facts_list:
+                    if isinstance(fact, dict):
+                        facts.append({
+                            **fact,
+                            'sourceUnit': unit_name,
+                            'sourceCallableId': callable_id,
+                            'sourceCallableName': callable_name,
+                            'integrationType': integration_kind
+                        })
 
     return facts

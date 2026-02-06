@@ -127,6 +127,7 @@ class IntegrationPoint:
     integration graph.
     """
     id: str  # Integration ID (e.g., IC000F001E0004)
+    integration_type: str
     source_unit: str
     source_callable_id: str
     source_callable_name: str
@@ -143,6 +144,7 @@ class IntegrationPoint:
         """Convert to dictionary for YAML serialization."""
         result: dict[str, Any] = {
             'id': self.id,
+            'integration_type': self.integration_type,
             'source_unit': self.source_unit,
             'source_callable_id': self.source_callable_id,
             'source_callable_name': self.source_callable_name,
@@ -236,6 +238,7 @@ class IntegrationPoint:
 
         return cls(
             id=data['id'],
+            integration_type=data.get('integration_type', 'unknown'),
             source_unit=data.get('source_unit', 'unknown'),
             source_callable_id=data.get('source_callable_id', 'unknown'),
             source_callable_name=data.get('source_callable_name', 'unknown'),
@@ -425,6 +428,7 @@ class GraphNode:
     """
     # Core integration point data
     id: str
+    integration_type: str
     source_unit: str
     source_callable_id: str
     source_callable_name: str
@@ -447,6 +451,7 @@ class GraphNode:
         """Convert to dictionary for YAML serialization."""
         result: dict[str, Any] = {
             'id': self.id,
+            'integration_type': self.integration_type,
             'source_unit': self.source_unit,
             'source_callable_id': self.source_callable_id,
             'source_callable_name': self.source_callable_name,
@@ -476,6 +481,7 @@ class GraphNode:
         """Create GraphNode from dictionary."""
         return cls(
             id=data['id'],
+            integration_type=data.get('integration_type', 'unknown'),
             source_unit=data.get('source_unit', 'unknown'),
             source_callable_id=data.get('source_callable_id', 'unknown'),
             source_callable_name=data.get('source_callable_name', 'unknown'),

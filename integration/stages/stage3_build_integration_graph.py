@@ -301,6 +301,7 @@ def build_integration_graph(
         # Create GraphNode
         node = GraphNode(
             id=point.id,
+            integration_type=point.integration_type,
             source_unit=point.source_unit,
             source_callable_id=point.source_callable_id,
             source_callable_name=point.source_callable_name,

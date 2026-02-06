@@ -344,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     flows = enumerate_flows(graph_data, verbose=args.verbose)
 
     # Build output
-    output_data = {
+    output_data: dict[str, Any] = {
         'stage': 'flow-enumeration',
         'flows': [flow.to_dict() for flow in flows]
     }

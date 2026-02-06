@@ -45,6 +45,7 @@ def create_integration_point(fact: dict) -> IntegrationPoint:
     source_callable_name = fact.get('sourceCallableName', 'unknown')
     target_raw = fact.get('target', '')
     kind = fact.get('kind', 'call')
+    integration_type = fact.get('integrationType', 'unknown')
 
     # Extract execution paths
     execution_paths = fact.get('executionPaths', [])
@@ -77,6 +78,7 @@ def create_integration_point(fact: dict) -> IntegrationPoint:
 
     return IntegrationPoint(
         id=integration_id,
+        integration_type=integration_type,
         source_unit=source_unit,
         source_callable_id=source_callable_id,
         source_callable_name=source_callable_name,
@@ -232,9 +234,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nCollected {len(points)} total integration points")
 
         # Show breakdown
-        interunit_count = sum(1 for p in points if p.boundary is None)
+        interunit_count = sum(1 for p in points if p.integration_type == 'interunit')
+        extlib_count = sum(1 for p in points if p.integration_type == 'extlib')
+        stdlib_count = sum(1 for p in points if p.integration_type == 'stdlib')
+        unknown_count = sum(1 for p in points if p.integration_type == 'unknown')
         boundary_count = sum(1 for p in points if p.boundary is not None)
         print(f"  Interunit: {interunit_count}")
+        print(f"  Extlib: {extlib_count}")
+        print(f"  Stdlib: {stdlib_count}")
+        print(f"  Unknown: {unknown_count}")
         print(f"  Boundaries: {boundary_count}")
 
     # Build output collection
