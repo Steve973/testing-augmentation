@@ -3,7 +3,7 @@
 
 [paths]
 # Where unit ledgers are located relative to project root
-ledgers_root = "ledgers"
+ledgers_root = "dist/ledgers"
 
 # Where integration flow outputs will be written
 integration_output_dir = "dist/integration-output"

@@ -140,7 +140,7 @@ def resolve_path(
 def get_ledgers_root() -> Path:
     """Get the root directory for ledger discovery (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('ledgers_root', 'ledgers'),
+        _CONFIG.get('paths', {}).get('ledgers_root', 'dist/ledgers'),
         relative_to_target=True
     )
 

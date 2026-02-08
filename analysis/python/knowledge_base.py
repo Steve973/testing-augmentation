@@ -8,6 +8,7 @@ Contains known patterns for:
 - Standard library modules
 """
 
+
 # Operations that ALWAYS can raise specific exceptions
 OPERATIONS_THAT_RAISE = {
     'int': {
@@ -32,6 +33,7 @@ OPERATIONS_THAT_RAISE = {
     },
 }
 
+
 # String methods that can raise
 STRING_METHODS_THAT_RAISE = {
     'index': {
@@ -45,6 +47,7 @@ STRING_METHODS_THAT_RAISE = {
         'ei_count': 2
     },
 }
+
 
 # JSON operations
 JSON_OPERATIONS = {
@@ -60,6 +63,7 @@ JSON_OPERATIONS = {
     },
 }
 
+
 # Operations that are ALWAYS deterministic (never raise)
 DETERMINISTIC_OPERATIONS = {
     'str',  # str() never raises
@@ -71,6 +75,7 @@ DETERMINISTIC_OPERATIONS = {
     'bytes',
     'bytearray',
 }
+
 
 # Boundary operations - filesystem
 FILESYSTEM_OPERATIONS = {
@@ -124,6 +129,7 @@ FILESYSTEM_OPERATIONS = {
     },
 }
 
+
 # Boundary operations - network (HTTP)
 NETWORK_HTTP_OPERATIONS = {
     'requests.get': {
@@ -169,6 +175,7 @@ NETWORK_HTTP_OPERATIONS = {
     },
 }
 
+
 # Boundary operations - database
 DATABASE_OPERATIONS = {
     'cursor.execute': {
@@ -191,6 +198,7 @@ DATABASE_OPERATIONS = {
     },
 }
 
+
 # Boundary operations - environment
 ENVIRONMENT_OPERATIONS = {
     'os.getenv': {
@@ -205,6 +213,7 @@ ENVIRONMENT_OPERATIONS = {
         'exceptions': ['KeyError']
     },
 }
+
 
 # Boundary operations - clock/time
 CLOCK_OPERATIONS = {
@@ -240,6 +249,7 @@ CLOCK_OPERATIONS = {
     },
 }
 
+
 # Boundary operations - randomness
 RANDOMNESS_OPERATIONS = {
     'random.random': {
@@ -265,6 +275,7 @@ RANDOMNESS_OPERATIONS = {
     },
 }
 
+
 # Boundary operations - subprocess
 SUBPROCESS_OPERATIONS = {
     'subprocess.run': {
@@ -287,6 +298,7 @@ SUBPROCESS_OPERATIONS = {
     },
 }
 
+
 # Combine all boundary operations
 BOUNDARY_OPERATIONS = {
     **FILESYSTEM_OPERATIONS,
@@ -298,19 +310,114 @@ BOUNDARY_OPERATIONS = {
     **SUBPROCESS_OPERATIONS,
 }
 
+
+STDLIB_CLASSES = {
+    # pathlib
+    'Path', 'PurePath', 'PosixPath', 'WindowsPath', 'PurePosixPath', 'PureWindowsPath',
+
+    # datetime
+    'datetime', 'date', 'time', 'timedelta', 'timezone', 'tzinfo',
+
+    # decimal/fractions
+    'Decimal', 'Context',
+    'Fraction',
+
+    # enum
+    'Enum', 'IntEnum', 'Flag', 'IntFlag', 'StrEnum',
+
+    # collections
+    'OrderedDict', 'defaultdict', 'Counter', 'deque', 'ChainMap',
+    'UserDict', 'UserList', 'UserString',
+
+    # re
+    'Pattern', 'Match',
+
+    # dataclasses
+    'dataclass', 'field',
+
+    # typing (commonly imported as names)
+    'NamedTuple', 'TypedDict',
+
+    # io
+    'StringIO', 'BytesIO', 'TextIOWrapper', 'BufferedReader', 'BufferedWriter',
+
+    # threading
+    'Thread', 'Lock', 'RLock', 'Semaphore', 'BoundedSemaphore', 'Event',
+    'Condition', 'Timer', 'Barrier',
+
+    # queue
+    'Queue', 'LifoQueue', 'PriorityQueue', 'SimpleQueue',
+
+    # argparse
+    'ArgumentParser', 'Namespace',
+
+    # logging
+    'Logger', 'Handler', 'Formatter', 'Filter', 'LogRecord',
+
+    # subprocess
+    'Popen', 'CompletedProcess', 'TimeoutExpired',
+
+    # socket
+    'socket',  # the socket class itself
+
+    # http
+    'HTTPStatus', 'HTTPResponse', 'HTTPConnection',
+
+    # email
+    'EmailMessage', 'Message',
+
+    # xml.etree.ElementTree
+    'Element', 'ElementTree',
+
+    # json
+    'JSONEncoder', 'JSONDecoder',
+
+    # abc
+    'ABC', 'ABCMeta',
+
+    # contextlib
+    'contextmanager', 'asynccontextmanager', 'suppress', 'ExitStack', 'AsyncExitStack',
+
+    # functools
+    'partial', 'partialmethod', 'cached_property',
+
+    # tempfile
+    'TemporaryFile', 'NamedTemporaryFile', 'SpooledTemporaryFile', 'TemporaryDirectory',
+
+    # weakref
+    'WeakValueDictionary', 'WeakKeyDictionary', 'WeakSet', 'WeakMethod',
+    'ref', 'proxy', 'finalize',
+
+    # concurrent.futures
+    'ThreadPoolExecutor', 'ProcessPoolExecutor', 'Future', 'Executor',
+
+    # multiprocessing
+    'Process', 'Pool', 'Manager', 'Value', 'Array',
+
+    # asyncio
+    'Task', 'Future',  # asyncio versions (namespace collision with concurrent.futures)
+
+    # unittest
+    'TestCase', 'TestSuite', 'TestLoader', 'TestResult',
+
+    # types (commonly used)
+    'SimpleNamespace', 'MappingProxyType',
+}
+
+
 # Python standard library modules
 STDLIB_MODULES = {
     # Core
-    'sys', 'os', 'io', 'pathlib', 'typing', 'types',
+    'sys', 'os', 'io', 'pathlib', 'typing', 'types', 'builtins',
 
     # Data structures
-    'collections', 'array', 'heapq', 'bisect', 'queue', 'weakref',
+    'collections', 'array', 'heapq', 'bisect', 'queue', 'weakref', 'copy',
 
-    # Iteration
+    # Iteration & functional
     'itertools', 'functools', 'operator',
 
     # Text processing
-    're', 'difflib', 'textwrap', 'unicodedata', 'stringprep',
+    're', 'difflib', 'textwrap', 'unicodedata', 'stringprep', 'string',
 
     # Binary data
     'struct', 'codecs',
@@ -331,38 +438,38 @@ STDLIB_MODULES = {
     'zlib', 'gzip', 'bz2', 'lzma', 'zipfile', 'tarfile',
 
     # Formats
-    'csv', 'json', 'xml', 'html', 'configparser', 'tomllib',
+    'csv', 'json', 'xml', 'html', 'configparser', 'tomllib', 'plistlib',
 
     # Crypto
     'hashlib', 'hmac', 'secrets',
 
-    # OS
-    'subprocess', 'signal', 'errno',
+    # OS interface
+    'subprocess', 'signal', 'errno', 'ctypes',
 
     # Concurrency
     'threading', 'multiprocessing', 'concurrent', 'asyncio', 'contextvars',
 
     # Networking
-    'socket', 'ssl', 'select', 'selectors', 'asyncore', 'asynchat',
+    'socket', 'ssl', 'select', 'selectors',
 
     # Internet protocols
-    'email', 'json', 'mailbox', 'mimetypes',
-    'base64', 'binascii', 'quopri', 'uu',
+    'email', 'mailbox', 'mimetypes', 'base64', 'binascii', 'quopri', 'uu',
 
-    # HTTP
-    'http', 'urllib', 'requests',  # requests is not stdlib but commonly used
+    # HTTP/URL
+    'http', 'urllib',
 
     # Logging
-    'logging', 'logging.handlers', 'logging.config',
+    'logging',
 
     # Testing
-    'unittest', 'doctest',
+    'unittest', 'doctest', 'mock',
 
-    # Debugging
-    'pdb', 'trace', 'traceback', 'warnings',
+    # Debugging/introspection
+    'pdb', 'trace', 'traceback', 'warnings', 'inspect', 'dis',
 
-    # Runtime
-    'abc', 'atexit', 'copy', 'enum', 'dataclasses', 'contextlib',
+    # Runtime services
+    'abc', 'atexit', 'enum', 'dataclasses', 'contextlib', 'importlib',
+    'pkgutil', 'modulefinder', 'runpy', 'site', 'sysconfig',
 }
 
 
@@ -400,6 +507,46 @@ PYTHON_BUILTINS = {
     # Special
     'cls', 'self',  # Not actually builtins but should never be integrations
 }
+
+
+COMMON_EXTLIB_MODULES = {
+    'aiohttp',
+    'bs4',
+    'certifi',
+    'cffi',
+    'chardet',
+    'cryptography',
+    'httpx',
+    'idna',
+    'itsdangerous',
+    'jinja2',
+    'lxml',
+    'markupsafe',
+    'numpy',
+    'packaging',
+    'pandas',
+    'pyOpenSSL',
+    'pyasn1',
+    'pyasn1_modules',
+    'pycparser',
+    'pydantic',
+    'pygments',
+    'pyjwt',
+    'pyopenssl',
+    'pyparsing',
+    'pysocks',
+    'pytz',
+    'pyyaml',
+    'requests',
+    'resolvelib',
+    'setuptools',
+    'tomli',
+    'tomli_w',
+    'urllib3',
+    'werkzeug',
+    'yaml',
+}
+
 
 BUILTIN_METHODS = {
     # Known builtin method patterns (never integrations)

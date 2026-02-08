@@ -22,10 +22,11 @@ from pathlib import Path
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from integration import config
-from ..shared.data_structures import IntegrationPoint, TargetRef, BoundarySummary, IntegrationPointCollection
-from ..shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc, extract_integration_facts
-from ..shared.yaml_utils import yaml_dump
+import config
+
+from shared.data_structures import IntegrationPoint, TargetRef, BoundarySummary, IntegrationPointCollection
+from shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc, extract_integration_facts
+from shared.yaml_utils import yaml_dump
 
 
 def create_integration_point(fact: dict) -> IntegrationPoint:

@@ -17,6 +17,7 @@ from callable_id_generation import (
     generate_nested_function_id,
     generate_method_id, generate_nested_class_id
 )
+from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
 from models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
 
 
@@ -132,7 +133,6 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
 
     Recursively processes all entries and their children.
     """
-    print(f"!!!! add_execution_paths CALLED with {len(entries)} entries !!!!")
     for entry in entries:
         # Skip if this has MechanicalOperation decorator
         skip_entry = False
@@ -142,15 +142,11 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     # Don't enumerate paths for mechanical operations
                     for integration in entry.get('ast_analysis', {}).get('integration_candidates', []):
                         integration['executionPaths'] = []
-                    print(f"!!!! skipped adding execution paths for decorated function !!!!")
                     skip_entry = True
                     break
 
         if skip_entry:
             continue
-
-        print(f"Processing entry: {entry['name']}")
-        print(f"  operation_metadata_decorators: {entry.get('decorators')}")
 
         # Process this entry if it's a callable with branches and integrations
         if (entry.get('needs_callable_analysis', False) and
@@ -170,11 +166,6 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
             # Build CFG for this callable
             graph = build_cfg(branches)
 
-            # DEBUG: Print the CFG
-            print(f"\n=== CFG for {entry['name']} ===")
-            for ei_id, successors in graph.items():
-                print(f"  {ei_id} -> {successors}")
-
             # Find entry points (EIs with no predecessors)
             all_ei_ids = [b.id for b in branches]
             predecessors: dict[str, list[str]] = {ei: [] for ei in all_ei_ids}
@@ -183,12 +174,6 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     predecessors[succ].append(ei)
 
             entry_eis = [ei for ei, preds in predecessors.items() if not preds]
-
-            # DEBUG: Print entry points and predecessors
-            print(f"\n=== Entry points: {entry_eis} ===")
-            print(f"=== Predecessors ===")
-            for ei_id, preds in predecessors.items():
-                print(f"  {ei_id} <- {preds}")
 
             # If no entry points found, use first line EIs
             if not entry_eis:
@@ -251,6 +236,46 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         self.method_counters: dict[str, int] = {}
         self.context_stack: list[str] = [unit_id]  # Track current nesting: [unit_id, class_id, method_id, ...]
         self.entries: list[CallableEntry] = []  # Store CallableEntry objects
+        self.import_map = {}  # bare_name -> FQN
+        self.interunit_imports = set()  # FQNs that are from the project
+        self.local_symbols: set[str] = set()  # All callables defined in this unit
+
+    def build_import_map(self, tree: ast.Module, project_fqns: set[str]) -> None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.asname if alias.asname else alias.name
+                    fqn = alias.name
+                    self.import_map[name] = fqn
+                    if fqn in project_fqns:
+                        self.interunit_imports.add(name)
+
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ''
+                for alias in node.names:
+                    name = alias.asname if alias.asname else alias.name
+                    fqn = f"{module}.{alias.name}" if module else alias.name
+                    self.import_map[name] = fqn
+                    if fqn in project_fqns:
+                        self.interunit_imports.add(name)
+
+    def build_symbol_table(self, tree: ast.Module) -> None:
+        """
+        Build a set of all callable names defined in this module.
+        Must be called before visiting the tree.
+        """
+        for node in ast.walk(tree):
+            # Module-level functions
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.local_symbols.add(node.name)
+
+            # Classes
+            elif isinstance(node, ast.ClassDef):
+                self.local_symbols.add(node.name)
+                # Also add all methods in the class
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        self.local_symbols.add(item.name)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Visit a class definition."""
@@ -409,8 +434,11 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         # Extract return type
         return_type = self._extract_type_ref(node.returns)
 
-        # Find integration candidates
-        integration_candidates = self._find_integration_candidates(node)
+        # Build parameter type map for type resolution
+        param_types = self._build_param_type_map(node)
+
+        # Find integration candidates (with type resolution)
+        integration_candidates = self._find_integration_candidates(node, param_types)
 
         return CallableEntry(
             id=callable_id,
@@ -598,6 +626,23 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         return params
 
+    def _build_param_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
+        """
+        Build a map of parameter names to their annotated type names.
+
+        Returns:
+            dict mapping param_name -> type_name (e.g., {'path': 'Path', 'fmt': 'str'})
+        """
+        type_map = {}
+
+        for arg in node.args.args:
+            if arg.annotation:
+                # Extract type name from annotation
+                type_str = ast.unparse(arg.annotation)
+                type_map[arg.arg] = type_str
+
+        return type_map
+
     def _extract_type_ref(self, annotation: ast.expr | None) -> TypeRef | None:
         """Extract TypeRef from type annotation."""
         if not annotation:
@@ -634,23 +679,94 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         return TypeRef(name=ast.unparse(annotation))
 
-    def _find_integration_candidates(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[IntegrationCandidate]:
+    def _find_integration_candidates(
+            self,
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
+            param_types: dict[str, str]
+    ) -> list[IntegrationCandidate]:
         """Find all potential integration points (function/method calls)."""
         candidates: list[IntegrationCandidate] = []
 
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 target = self._get_call_target(child)
-                if target and target != 'super':  # Skip super() calls
+                if target and self._is_external_call(target):
+                    # Resolve target using imports and type annotations
+                    resolved_target = self._resolve_target(target, param_types)
+
                     candidate = IntegrationCandidate(
                         type='call',
-                        target=target,
+                        target=resolved_target,  # <-- Use resolved target
                         line=child.lineno,
                         signature=ast.unparse(child)
                     )
                     candidates.append(candidate)
 
         return candidates
+
+    def _resolve_target(self, target: str, param_types: dict[str, str]) -> str:
+        """
+        Resolve target to FQN using import map and type annotations.
+
+        Resolution strategies:
+        1. Import resolution: bare_name -> FQN from imports
+        2. Type annotation resolution: param.method -> Type.method
+        """
+        first_part = target.split('.')[0]
+
+        # Strategy 1: Import resolution
+        if first_part in self.import_map:
+            fqn_first = self.import_map[first_part]
+            return target.replace(first_part, fqn_first, 1)
+
+        # Strategy 2: Type annotation resolution
+        if first_part in param_types:
+            param_type = param_types[first_part]
+            base_type = param_type.split('[')[0]
+
+            # Don't resolve if type is Any - leave as variable name
+            if base_type == 'Any':
+                return target
+
+            return target.replace(first_part, base_type, 1)
+
+        return target
+
+    def _is_external_call(self, target: str) -> bool:
+        """
+        Check if target is a call outside the current unit.
+
+        Returns False for:
+        - super() calls
+        - self.* calls (same class methods)
+        - cls.* calls (same class class methods)
+        - Python builtins
+        - Builtin collection methods
+        - Same-unit function/method calls
+        """
+
+        # 1. Skip super() calls
+        if target == 'super':
+            return False
+
+        # 2. Skip self/cls calls - these are NOT integration points
+        if target.startswith('self.') or target.startswith('cls.') or target.startswith('object.'):
+            return False
+
+        # 3. Skip Python builtins
+        parts = target.split('.')
+        base_name = parts[-1].split('(')[0]
+        if base_name in PYTHON_BUILTINS or base_name in BUILTIN_METHODS:
+            return False
+
+        # 4. Skip same-unit calls - if the base name is defined in this file
+        # For bare function calls like "_normalize", the base_name is the function itself
+        # For qualified calls like "obj.method", check if base_name (obj) is a class in this file
+        first_part = target.split('.')[0]
+        if first_part in self.local_symbols:
+            return False
+
+        return True
 
     def _get_call_target(self, call_node: ast.Call) -> str | None:
         """Extract the target of a function/method call."""
@@ -685,11 +801,19 @@ def derive_fqn(filepath: Path, source_root: Path) -> str:
 def process_file(
         filepath: Path,
         fqn: str,
+        inventory_path: Path,
         unit_id: str,
         output_root: Path,
         ei_root: Path | None = None
 ) -> dict[str, Any]:
     """Process a Python file and generate inventory."""
+
+    project_types: set[str] = set()
+    with open(inventory_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                project_types.add(line)
 
     # Read source
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -705,6 +829,8 @@ def process_file(
     # Enumerate callables
     enumerator = EnhancedCallableEnumerator(source, unit_id)
     enumerator.entries = []  # Initialize entries list
+    enumerator.build_import_map(tree, project_types)
+    enumerator.build_symbol_table(tree)  # Build symbol table for same-unit filtering
     enumerator.visit(tree)
 
     # Convert CallableEntry objects to dicts for downstream processing
@@ -826,6 +952,7 @@ def main() -> int:
 
     parser.add_argument('--file', type=Path, required=True, help='Python source file')
     parser.add_argument('--fqn', type=str, required=True, help='Fully qualified name')
+    parser.add_argument('--project-inventory', type=Path, help='Path to project type inventory file')
     parser.add_argument('--unit-id', type=str, required=True, help='Unique ID for unit')
     parser.add_argument('--output-root', type=Path, default=Path('dist/inventory'),
                         help='Root directory for inventory output')
@@ -840,7 +967,7 @@ def main() -> int:
     print(f"Processing: {args.file}")
     print(f"  → FQN: {args.fqn}")
 
-    process_file(args.file, args.fqn, args.unit_id, args.output_root, args.ei_root)
+    process_file(args.file, args.fqn, args.project_inventory, args.unit_id, args.output_root, args.ei_root)
 
     return 0
 

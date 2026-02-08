@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from callable_id_generation import ei_id_to_integration_id
+from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS, COMMON_EXTLIB_MODULES
+
 
 # =============================================================================
 # Common Types
@@ -211,7 +214,7 @@ class IntegrationCandidate:
         integration_id: str | None = None
         if self.execution_paths and self.execution_paths[0]:
             last_ei = self.execution_paths[0][-1]
-            integration_id = f"I{last_ei}"
+            integration_id = ei_id_to_integration_id(last_ei)
 
         fact: dict[str, Any] = {}
 
@@ -384,7 +387,7 @@ class CallableEntry:
 
         for candidate in self.integration_candidates:
             # Check if this is actually an integration (not a non-integration)
-            if self._is_non_integration(candidate.target):
+            if self.is_non_integration(candidate.target):
                 continue  # Skip non-integrations entirely
 
             category = self._determine_category(candidate.target, project_types)
@@ -444,27 +447,12 @@ class CallableEntry:
         # 5. UNKNOWN - can't determine
         return IntegrationCategory.UNKNOWN
 
-    def _is_non_integration(self, target: str) -> bool:
+    def is_non_integration(self, target: str) -> bool:
         """
         Check if target should be filtered out (not an actual integration).
 
         Returns True if this is NOT an integration point.
         """
-        # Import knowledge_base items
-        try:
-            from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
-        except ImportError:
-            # Fallback to minimal set if knowledge_base not available
-            PYTHON_BUILTINS = {
-                'sorted', 'str', 'len', 'isinstance', 'type', 'int', 'float',
-                'bool', 'list', 'dict', 'set', 'tuple', 'repr', 'abs', 'all',
-                'any', 'enumerate', 'filter', 'map', 'zip', 'range', 'sum',
-                'min', 'max', 'iter', 'next', 'hasattr', 'getattr', 'setattr'
-            }
-            BUILTIN_METHODS = {
-                'items', 'keys', 'values', 'get', 'append', 'extend',
-                'split', 'join', 'strip', 'lower', 'upper'
-            }
 
         # Get base name (last part after final dot)
         parts = target.split('.')
@@ -592,54 +580,29 @@ class CallableEntry:
 
     @staticmethod
     def _is_stdlib_call(target: str) -> bool:
-        """
-        Check if target is from Python standard library.
-        """
-        # Try importing knowledge_base
-        try:
-            from knowledge_base import is_stdlib_module
-
-            # Extract module name
-            parts = target.split('.')
-            if not parts:
-                return False
-
-            module_name = parts[0]
-            return is_stdlib_module(module_name)
-        except ImportError:
-            pass
-
-        # Fallback: common stdlib modules
+        """Check if target is from Python standard library."""
         parts = target.split('.')
         if not parts:
             return False
 
-        module_name = parts[0]
+        first_part = parts[0]
 
-        stdlib_modules = {
-            'json', 'os', 'sys', 're', 'math', 'collections',
-            'itertools', 'functools', 'pathlib', 'typing',
-            'dataclasses', 'datetime', 'time', 'hashlib',
-            'hmac', 'base64', 'binascii', 'struct', 'pickle',
-            'csv', 'xml', 'html', 'email', 'urllib', 'http'
-        }
+        # Check if it's a stdlib module
+        from knowledge_base import is_stdlib_module, STDLIB_CLASSES
+        if is_stdlib_module(first_part):
+            return True
 
-        return module_name in stdlib_modules
+        # Check if it's a class from stdlib
+        if first_part in STDLIB_CLASSES:
+            return True
+
+        return False
 
     def _is_known_third_party(self, target: str) -> bool:
         """
         Check if target is from known third-party libraries.
         """
-        third_party_prefixes = [
-            'tomli.', 'tomli_w.',  # TOML
-            'yaml.', 'pyyaml.',  # YAML
-            'lxml.', 'bs4.',  # XML/HTML
-            'numpy.', 'pandas.',  # Data science
-            'pytest.', 'requests.',  # Testing/HTTP
-            'aiohttp.', 'httpx.',  # Async HTTP
-        ]
-
-        return any(target.startswith(prefix) for prefix in third_party_prefixes)
+        return any(target.startswith(f"{prefix}.") for prefix in COMMON_EXTLIB_MODULES)
 
     def to_ledger_callable_spec(self, project_types: set[str]) -> dict[str, Any]:
         """

@@ -864,7 +864,7 @@ class EntryPointInfo:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EntryPointInfo:
-        """Create EntryPointInfo from dictionary."""
+        """Create EntryPointInfo from the dictionary."""
         return cls(
             integration_id=data.get('integration_id', 'unknown'),
             unit_id=data.get('unit_id', 'unknown'),
@@ -875,36 +875,29 @@ class EntryPointInfo:
 
 
 @dataclass
-class TerminalNodeInfo:
-    """
-    Information about the terminal node of a flow.
-
-    Describes the final integration point (boundary or excluded operation).
-    """
-    integration_id: str  # Terminal integration point ID
-    boundary: str | None = None  # Boundary kind if this is a boundary
-    excluded_operation: str | None = None  # Callable ID if excluded
-    reason: str | None = None  # Why this is terminal
+class FlowTermination:
+    """Why traversal stopped - structural reasons only."""
+    integration_id: str  # Last integration point reached
+    reason: str  # 'no_outgoing_edges' | 'depth_limit' | 'cycle_detected'
+    note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for YAML serialization."""
-        result: dict[str, Any] = {'integration_id': self.integration_id}
-        if self.boundary:
-            result['boundary'] = self.boundary
-        if self.excluded_operation:
-            result['excluded_operation'] = self.excluded_operation
-        if self.reason:
-            result['reason'] = self.reason
+        result: dict[str, Any] = {
+            'integration_id': self.integration_id,
+            'reason': self.reason,
+        }
+        if self.note:
+            result['note'] = self.note
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TerminalNodeInfo:
-        """Create TerminalNodeInfo from dictionary."""
+    def from_dict(cls, data: dict[str, Any]) -> FlowTermination:
+        """Create TerminalNodeInfo from the dictionary."""
         return cls(
             integration_id=data.get('integration_id', 'unknown'),
-            boundary=data.get('boundary'),
-            excluded_operation=data.get('excluded_operation'),
-            reason=data.get('reason')
+            reason=data.get('reason'),
+            note=data.get('note'),
         )
 
 
@@ -925,7 +918,7 @@ class Flow:
     length: int  # Number of integration points
     sequence: list[GraphNode]  # Nodes or fixtures
     entry_point: EntryPointInfo
-    terminal_node: TerminalNodeInfo
+    termination: FlowTermination
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for YAML serialization."""
@@ -938,12 +931,12 @@ class Flow:
             'length': self.length,
             'sequence': sequence_dicts,
             'entry_point': self.entry_point.to_dict(),
-            'terminal_node': self.terminal_node.to_dict(),
+            'termination': self.termination.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Flow:
-        """Create Flow from dictionary."""
+        """Create Flow from the dictionary."""
         # Parse sequence
         sequence: list[GraphNode] = []
         for item in data.get('sequence', []):
@@ -957,7 +950,7 @@ class Flow:
             length=data.get('length', 0),
             sequence=sequence,
             entry_point=EntryPointInfo.from_dict(data.get('entry_point', {})),
-            terminal_node=TerminalNodeInfo.from_dict(data.get('terminal_node', {}))
+            termination=FlowTermination.from_dict(data.get('termination', {}))
         )
 
 

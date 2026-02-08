@@ -20,6 +20,44 @@ from models import Branch
 
 
 # ============================================================================
+# Operation Extraction
+# ============================================================================
+
+def extract_all_operations(node: ast.AST) -> list[ast.Call]:
+    """
+    Extract ALL Call nodes from an AST in execution order.
+
+    For nested/chained calls like Path(fetch(url)).resolve():
+    - Returns: [fetch(url), Path(...), Path(...).resolve()]
+    - Execution order: innermost first (by depth), then left-to-right
+
+    Returns:
+        List of ast.Call nodes in execution order
+    """
+    operations = []
+
+    # Collect all Call nodes with their depth
+    def collect_calls_with_depth(n: ast.AST, depth: int = 0) -> None:
+        """Recursively collect calls with their nesting depth."""
+        if isinstance(n, ast.Call):
+            # Record this call with its depth and position
+            operations.append((n, depth, n.lineno, n.col_offset))
+
+        # Recurse into children with increased depth
+        for child in ast.iter_child_nodes(n):
+            collect_calls_with_depth(child, depth + 1)
+
+    collect_calls_with_depth(node)
+
+    # Sort by: depth (deepest/innermost first), then line, then column
+    # This gives us execution order: inner calls before outer calls
+    operations.sort(key=lambda x: (-x[1], x[2], x[3]))
+
+    # Return just the Call nodes
+    return [op[0] for op in operations]
+
+
+# ============================================================================
 # Statement Decomposers
 # ============================================================================
 
@@ -158,11 +196,11 @@ def decompose_assert(stmt: ast.Assert, source_lines: list[str]) -> list[str]:
 
 def decompose_assignment(stmt: ast.Assign, source_lines: list[str]) -> list[str]:
     """
-    Assignment: Usually 1 EI.
+    Assignment: Enumerate all operations, then the assignment itself.
     Special cases:
     - List/dict/set comprehension: 2-3 EIs
     - Ternary expression: 4 EIs
-    - Function calls that can raise: 2+ EIs
+    - Operations (calls, chained/nested): separate EIs for each
     """
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
 
@@ -182,15 +220,23 @@ def decompose_assignment(stmt: ast.Assign, source_lines: list[str]) -> list[str]
     if isinstance(stmt.value, ast.IfExp):
         return decompose_ternary(stmt.value)
 
-    # Check if assignment contains calls that can raise
-    has_call, call_str = contains_call_that_can_raise(stmt.value)
-    if has_call and call_str:
-        return [
-            f"{call_str} succeeds → {line_text}",
-            f"{call_str} raises exception → exception propagates"
-        ]
+    # Extract all operations (calls, in execution order)
+    operations = extract_all_operations(stmt.value)
 
-    # Regular assignment
+    if operations:
+        eis = []
+        for op_call in operations:
+            call_str = ast.unparse(op_call)
+            eis.append(f"{call_str} succeeds")
+            eis.append(f"{call_str} raises exception → exception propagates")
+
+        # Only add "all operations succeed" EI if there are multiple operations
+        if len(operations) > 1:
+            eis.append(f"all operations succeed → {line_text}")
+
+        return eis
+
+    # Regular assignment (no operations)
     return [f"executes: {line_text}"]
 
 
@@ -255,17 +301,22 @@ def decompose_annassign(stmt: ast.AnnAssign, source_lines: list[str]) -> list[st
 
 
 def decompose_return(stmt: ast.Return, source_lines: list[str]) -> list[str]:
-    """Return statement: 1-2 EIs (may include exception path if contains call)."""
+    """Return statement: Enumerate operations, then the return."""
     if stmt.value:
         ret_val = ast.unparse(stmt.value)
 
-        # Check if return value contains calls that can raise
-        has_call, call_str = contains_call_that_can_raise(stmt.value)
-        if has_call and call_str:
-            return [
-                f"{call_str} succeeds → returns {ret_val}",
-                f"{call_str} raises exception → exception propagates"
-            ]
+        # Extract all operations
+        operations = extract_all_operations(stmt.value)
+
+        if operations:
+            eis = []
+            for op_call in operations:
+                call_str = ast.unparse(op_call)
+                eis.append(f"{call_str} succeeds")
+                eis.append(f"{call_str} raises exception → exception propagates")
+            # Final EI: return completes (only if all operations succeed)
+            eis.append(f"all operations succeed → returns {ret_val}")
+            return eis
 
         return [f"returns {ret_val}"]
     else:
@@ -316,20 +367,23 @@ def decompose_importfrom(stmt: ast.ImportFrom, source_lines: list[str]) -> list[
 
 
 def decompose_expr(stmt: ast.Expr, source_lines: list[str]) -> list[str]:
-    """Expression statement: Usually 1 EI (unless it's a docstring or contains calls that raise)."""
+    """Expression statement: Enumerate all operations."""
     # Skip docstrings (string literals as the first statement)
     if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
         return []  # Docstrings don't create EIs
 
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
 
-    # Check if the expression contains calls that can raise
-    has_call, call_str = contains_call_that_can_raise(stmt.value)
-    if has_call and call_str:
-        return [
-            f"{call_str} succeeds → continues",
-            f"{call_str} raises exception → exception propagates"
-        ]
+    # Extract all operations
+    operations = extract_all_operations(stmt.value)
+
+    if operations:
+        eis = []
+        for op_call in operations:
+            call_str = ast.unparse(op_call)
+            eis.append(f"{call_str} succeeds")
+            eis.append(f"{call_str} raises exception → exception propagates")
+        return eis
 
     return [f"executes: {line_text}"]
 

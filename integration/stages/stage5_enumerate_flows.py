@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from integration import config
 from ..shared.yaml_utils import yaml_load, yaml_dump
 from ..shared.data_structures import (
-    GraphNode, Flow, EntryPointInfo, TerminalNodeInfo,
+    GraphNode, Flow, EntryPointInfo, FlowTermination,
     load_graph_nodes
 )
 
@@ -39,7 +39,7 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[F
     Enumerate all complete flows through the integration graph.
 
     Uses depth-first search from each entry point, following edges
-    until reaching terminal nodes. Detects cycles to prevent infinite loops.
+    until reaching structural termination (no more edges, depth limit).
 
     Args:
         graph_data: Integration graph from Stage 3
@@ -53,7 +53,6 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[F
     classification = graph_data.get('classification', {})
 
     entry_points = set(classification.get('entryPoints', []))
-    terminal_nodes = set(classification.get('terminalNodes', []))
 
     if not nodes_list or not entry_points:
         return []
@@ -125,146 +124,149 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[F
             if flow_counter >= max_flows_total:
                 break
 
-            # Check if we've reached a terminal node
-            if current_id in terminal_nodes:
-                # Found a complete flow!
-                flow_counter += 1
-                flows_from_this_entry += 1
-                flow_id = f"FLOW_{flow_counter:04d}"
-
-                # Build flow sequence with GraphNode objects
-                sequence: list[GraphNode] = []
-                for node_id in path:
-                    node = nodes_by_id.get(node_id)
-                    if node:
-                        sequence.append(node)
-
-                # Build entry point info
-                entry_node = nodes_by_id.get(entry_id)
-                if entry_node:
-                    entry_point_info = EntryPointInfo(
-                        integration_id=entry_id,
-                        unit_id=entry_node.source_unit,
-                        callable_id=entry_node.source_callable_id,
-                        callable_name=entry_node.source_callable_name,
-                        way_in=f"Call {entry_node.source_callable_name} to reach first integration point"
-                    )
-                else:
-                    entry_point_info = EntryPointInfo(
-                        integration_id=entry_id,
-                        unit_id='unknown',
-                        callable_id='unknown',
-                        callable_name='unknown',
-                        way_in='unknown'
-                    )
-
-                # Build terminal node info
-                terminal_node_obj = nodes_by_id.get(current_id)
-                if terminal_node_obj:
-                    terminal_node_info = TerminalNodeInfo(
-                        integration_id=current_id,
-                        boundary=terminal_node_obj.boundary.kind if terminal_node_obj.boundary else None
-                    )
-                else:
-                    terminal_node_info = TerminalNodeInfo(
-                        integration_id=current_id,
-                        boundary=None
-                    )
-
-                # Build flow description
-                flow_description = ' → '.join([
-                    f"FIXTURE_{node.fixture_callable_id or 'UNKNOWN'}"
-                    if node.exclude_from_flows
-                    else node.target
-                    for node in sequence
-                ])
-
-                flows.append(
-                    Flow(
-                        flow_id=flow_id,
-                        description=flow_description,
-                        length=len(path),
-                        sequence=sequence,
-                        entry_point=entry_point_info,
-                        terminal_node=terminal_node_info
-                    )
-                )
-
-                continue  # Don't explore further from terminal nodes
-
-            # Check if current node should be excluded from flows (mechanical operation)
-            current_node = nodes_by_id.get(current_id)
-            if current_node and current_node.exclude_from_flows:
-                # Treat this like a terminal node - record flow and stop
-                flow_counter += 1
-                flows_from_this_entry += 1
-                flow_id = f"FLOW_{flow_counter:04d}"
-
-                # Build flow sequence with GraphNode objects
-                sequence: list[GraphNode] = []
-                for node_id in path:
-                    node = nodes_by_id.get(node_id)
-                    if node:
-                        sequence.append(node)
-
-                # Build entry point info
-                entry_node = nodes_by_id.get(entry_id)
-                if entry_node:
-                    entry_point_info = EntryPointInfo(
-                        integration_id=entry_id,
-                        unit_id=entry_node.source_unit,
-                        callable_id=entry_node.source_callable_id,
-                        callable_name=entry_node.source_callable_name,
-                        way_in=f"Call {entry_node.source_callable_name} to reach first integration point"
-                    )
-                else:
-                    entry_point_info = EntryPointInfo(
-                        integration_id=entry_id,
-                        unit_id='unknown',
-                        callable_id='unknown',
-                        callable_name='unknown',
-                        way_in='unknown'
-                    )
-
-                # Terminal is the excluded node
-                terminal_node_info = TerminalNodeInfo(
-                    integration_id=current_id,
-                    excluded_operation=current_node.fixture_callable_id,
-                    reason='MechanicalOperation or UtilityOperation'
-                )
-
-                # Build flow description
-                flow_description = ' → '.join([
-                    f"FIXTURE_{node.fixture_callable_id or 'UNKNOWN'}"
-                    if node.exclude_from_flows
-                    else node.target
-                    for node in sequence
-                ])
-
-                flows.append(
-                    Flow(
-                        flow_id=flow_id,
-                        description=flow_description,
-                        length=len(path),
-                        sequence=sequence,
-                        entry_point=entry_point_info,
-                        terminal_node=terminal_node_info
-                    )
-                )
-
-                continue  # Don't explore further from excluded nodes
-
-            # Check depth limit
+            # Check depth limit FIRST
             if len(path) >= max_depth:
+                # Hit depth limit - record flow with depth_limit termination
                 depth_warnings += 1
                 if verbose and depth_warnings <= max_warnings_to_show:
                     print(
                         f"    WARNING: Flow from {entry_id} reached max depth ({max_depth}), current path length: {len(path)}")
                     print(f"             Last few nodes: {' → '.join(path[-5:])}")
-                continue
 
-            # Explore neighbors
+                # Still record this as a flow (just terminated early)
+                flow_counter += 1
+                flows_from_this_entry += 1
+                flow_id = f"FLOW_{flow_counter:04d}"
+
+                # Build flow sequence
+                sequence: list[GraphNode] = []
+                for node_id in path:
+                    node = nodes_by_id.get(node_id)
+                    if node:
+                        sequence.append(node)
+
+                # Build entry point info
+                entry_node = nodes_by_id.get(entry_id)
+                if entry_node:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id=entry_node.source_unit,
+                        callable_id=entry_node.source_callable_id,
+                        callable_name=entry_node.source_callable_name,
+                        way_in=f"Call {entry_node.source_callable_name} to reach first integration point"
+                    )
+                else:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id='unknown',
+                        callable_id='unknown',
+                        callable_name='unknown',
+                        way_in='unknown'
+                    )
+
+                # Termination info
+                termination = FlowTermination(
+                    integration_id=current_id,
+                    reason='depth_limit',
+                    note=f'Flow exceeded maximum depth of {max_depth} hops'
+                )
+
+                # Build flow description
+                flow_description = ' → '.join([
+                    f"FIXTURE_{node.fixture_callable_id or 'UNKNOWN'}"
+                    if node.exclude_from_flows
+                    else node.target
+                    for node in sequence
+                ])
+
+                flows.append(
+                    Flow(
+                        flow_id=flow_id,
+                        description=flow_description,
+                        length=len(path),
+                        sequence=sequence,
+                        entry_point=entry_point_info,
+                        termination=termination
+                    )
+                )
+
+                continue  # Don't explore further from depth-limited paths
+
+            # Get neighbors for current node
             neighbors = adjacency.get(current_id, [])
+
+            # STRUCTURAL TERMINAL CONDITION: No outgoing edges
+            if not neighbors:
+                # Found a complete flow - natural termination!
+                flow_counter += 1
+                flows_from_this_entry += 1
+                flow_id = f"FLOW_{flow_counter:04d}"
+
+                # Build flow sequence with GraphNode objects
+                sequence: list[GraphNode] = []
+                for node_id in path:
+                    node = nodes_by_id.get(node_id)
+                    if node:
+                        sequence.append(node)
+
+                # Build entry point info
+                entry_node = nodes_by_id.get(entry_id)
+                if entry_node:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id=entry_node.source_unit,
+                        callable_id=entry_node.source_callable_id,
+                        callable_name=entry_node.source_callable_name,
+                        way_in=f"Call {entry_node.source_callable_name} to reach first integration point"
+                    )
+                else:
+                    entry_point_info = EntryPointInfo(
+                        integration_id=entry_id,
+                        unit_id='unknown',
+                        callable_id='unknown',
+                        callable_name='unknown',
+                        way_in='unknown'
+                    )
+
+                # Build termination info
+                current_node = nodes_by_id.get(current_id)
+                note = None
+                if current_node:
+                    if current_node.boundary:
+                        note = f"Boundary integration: {current_node.boundary.kind}"
+                    elif current_node.exclude_from_flows:
+                        note = f"Excluded operation: {current_node.fixture_callable_id}"
+                    else:
+                        note = "Leaf node in integration graph"
+
+                termination = FlowTermination(
+                    integration_id=current_id,
+                    reason='no_outgoing_edges',
+                    note=note
+                )
+
+                # Build flow description
+                flow_description = ' → '.join([
+                    f"FIXTURE_{node.fixture_callable_id or 'UNKNOWN'}"
+                    if node.exclude_from_flows
+                    else node.target
+                    for node in sequence
+                ])
+
+                flows.append(
+                    Flow(
+                        flow_id=flow_id,
+                        description=flow_description,
+                        length=len(path),
+                        sequence=sequence,
+                        entry_point=entry_point_info,
+                        termination=termination
+                    )
+                )
+
+                continue  # This path is complete
+
+            # Explore neighbors (continue traversal)
             for neighbor_id in neighbors:
                 # Cycle detection: don't revisit nodes in current path
                 if neighbor_id not in visited:
@@ -276,7 +278,7 @@ def enumerate_flows(graph_data: dict[str, Any], verbose: bool = False) -> list[F
         print(f"  Found {len(flows)} complete flows")
         if depth_warnings > 0:
             print(f"  WARNING: {depth_warnings} paths hit max depth limit ({max_depth})")
-            print(f"           This may indicate cycles or very deep chains")
+            print(f"           This may indicate very deep chains or missing decorator annotations")
             print(f"           Consider increasing max_flow_depth in config if needed")
 
     return flows

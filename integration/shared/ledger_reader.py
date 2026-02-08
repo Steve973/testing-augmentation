@@ -50,7 +50,7 @@ def discover_ledgers(
 def _is_ledger_file(path: Path) -> bool:
     """Check if a file is a ledger file based on naming convention."""
     name_lower = path.name.lower()
-    return name_lower.endswith('-ledger.yaml') or name_lower.endswith('-ledger.yml')
+    return name_lower.endswith('.ledger.yaml') or name_lower.endswith('.ledger.yml')
 
 
 def load_ledgers(ledger_paths: list[Path]) -> list[dict[str, Any]]:
@@ -152,7 +152,7 @@ def extract_integration_facts(ledger_doc: dict[str, Any]) -> list[dict[str, Any]
             entries_to_process.extend(c for c in children if isinstance(c, dict))
 
         # Only process callable entries
-        if entry.get('kind') != 'callable':
+        if entry.get('kind') not in ('function', 'method', 'callable'):
             continue
 
         callable_spec = entry.get('callable')
