@@ -515,6 +515,8 @@ class CallableEntry:
             return {'kind': 'filesystem', 'operation': 'write'}
         if 'Path.open' in target or target.startswith('open('):
             return {'kind': 'filesystem', 'operation': 'read/write'}
+        if 'Path.resolve' in target or '.resolve' in target:
+            return {'kind': 'filesystem', 'operation': 'read'}
         if '.as_posix' in target:
             return {'kind': 'filesystem', 'operation': 'access'}
 

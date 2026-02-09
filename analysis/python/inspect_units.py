@@ -1,211 +1,252 @@
 #!/usr/bin/env python3
 """
-Extract all types (classes and functions) from a Python project.
+Generate callable ID inventory for a Python project.
 
-Generates project-inventory.txt for use in integration categorization.
+Walks all Python files, discovers all callables (functions, methods, nested functions),
+assigns IDs using callable_id_generation, and outputs FQN:ID mappings.
 
 Usage:
-    python inspect_units.py <project_root> --source-root <src> --output-root <o>
+    python inspect_units.py <source_root> --output <inventory_file>
 
 Example:
-    python inspect_units.py . --source-root src --output-root dist/inspect
+    python inspect_units.py src --output dist/inspect/callable-inventory.txt
 """
 
 import argparse
 import ast
 import sys
 from pathlib import Path
-from typing import List, Set
+from typing import Dict
+
+from callable_id_generation import (
+    generate_unit_id,
+    generate_class_id,
+    generate_method_id,
+    generate_function_id,
+    generate_nested_function_id,
+    generate_nested_class_id,
+)
 
 
-# Directories to exclude from scanning
-EXCLUDED_DIRS = {
-    '.venv',
-    'venv',
-    '__pycache__',
-    '.git',
-    '.idea',
-    '.vscode',
-    'node_modules',
-    'build',
-    'dist',
-    '.pytest_cache',
-    '.mypy_cache',
-    '.tox',
-    'eggs',
-    '.eggs',
-}
-
-
-def should_skip_path(path: Path) -> bool:
-    """Check if a path should be skipped during scanning."""
-    # Skip if any parent directory is in excluded list
-    for part in path.parts:
-        if part in EXCLUDED_DIRS:
-            return True
-    return False
-
-
-def get_module_name_from_path(filepath: Path, source_root: Path) -> str:
+def derive_fqn(filepath: Path, source_root: Path) -> str:
     """
-    Convert a file path to a module name.
+    Convert file path to fully qualified module name.
 
     Example:
-        /path/to/src/project/model/keys.py -> project.model.keys
+        src/project/model/keys.py -> project.model.keys
     """
     relative = filepath.relative_to(source_root)
     parts = list(relative.parts[:-1]) + [relative.stem]
 
-    # Remove __init__ from module name
-    if parts[-1] == "__init__":
+    # Remove __init__ from end
+    if parts and parts[-1] == "__init__":
         parts = parts[:-1]
 
     return ".".join(parts)
 
 
-def extract_types_from_file(filepath: Path, source_root: Path) -> List[str]:
+class CallableIDVisitor(ast.NodeVisitor):
     """
-    Extract all class and function definitions from a Python file.
-    Returns fully qualified names.
+    AST visitor that discovers all callables and assigns IDs.
+
+    Maintains counters for functions, classes, methods, and nested structures
+    to generate deterministic IDs matching the callable_id_generation module.
+    """
+
+    def __init__(self, unit_id: str, module_fqn: str):
+        self.unit_id = unit_id
+        self.module_fqn = module_fqn
+        self.mappings: Dict[str, str] = {}
+
+        # Counters
+        self.function_counter = 0
+        self.class_counter = 0
+        self.method_counters: Dict[str, int] = {}  # class_id -> counter
+        self.nested_function_counters: Dict[str, int] = {}  # parent_id -> counter
+        self.nested_class_counters: Dict[str, int] = {}  # parent_id -> counter
+
+        # Context stack for tracking FQN and parent IDs
+        self.fqn_stack = [module_fqn]
+        self.id_stack = [unit_id]
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Visit a class definition."""
+        parent_id = self.id_stack[-1]
+        parent_fqn = self.fqn_stack[-1]
+
+        # Determine if this is a nested class
+        if parent_id == self.unit_id:
+            # Top-level class
+            self.class_counter += 1
+            class_id = generate_class_id(self.unit_id, self.class_counter)
+        else:
+            # Nested class
+            if parent_id not in self.nested_class_counters:
+                self.nested_class_counters[parent_id] = 0
+            self.nested_class_counters[parent_id] += 1
+            class_id = generate_nested_class_id(parent_id, self.nested_class_counters[parent_id])
+
+        # Build FQN
+        fqn = f"{parent_fqn}.{node.name}"
+
+        # Record mapping
+        self.mappings[fqn] = class_id
+
+        # Initialize method counter for this class
+        self.method_counters[class_id] = 0
+
+        # Push context and visit children
+        self.fqn_stack.append(fqn)
+        self.id_stack.append(class_id)
+        self.generic_visit(node)
+        self.id_stack.pop()
+        self.fqn_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Visit a function definition."""
+        self._visit_function_or_async(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Visit an async function definition."""
+        self._visit_function_or_async(node)
+
+    def _visit_function_or_async(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Handle both sync and async functions."""
+        parent_id = self.id_stack[-1]
+        parent_fqn = self.fqn_stack[-1]
+
+        # Determine context: unit-level function, method, or nested function
+        if parent_id == self.unit_id:
+            # Top-level function
+            self.function_counter += 1
+            callable_id = generate_function_id(self.unit_id, self.function_counter)
+        elif parent_id.endswith(tuple(f'_C{i:03d}' for i in range(1, 1000))):
+            # Parent is a class -> this is a method
+            self.method_counters[parent_id] += 1
+            callable_id = generate_method_id(parent_id, self.method_counters[parent_id])
+        else:
+            # Nested function
+            if parent_id not in self.nested_function_counters:
+                self.nested_function_counters[parent_id] = 0
+            self.nested_function_counters[parent_id] += 1
+            callable_id = generate_nested_function_id(parent_id, self.nested_function_counters[parent_id])
+
+        # Build FQN
+        fqn = f"{parent_fqn}.{node.name}"
+
+        # Record mapping
+        self.mappings[fqn] = callable_id
+
+        # Push context and visit children (for nested functions/classes)
+        self.fqn_stack.append(fqn)
+        self.id_stack.append(callable_id)
+        self.generic_visit(node)
+        self.id_stack.pop()
+        self.fqn_stack.pop()
+
+
+def process_file(filepath: Path, source_root: Path) -> Dict[str, str]:
+    """
+    Process a single Python file and return FQN->ID mappings.
+
+    Returns:
+        Dict mapping fully qualified names to callable IDs
     """
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            content = f.read()
+            source = f.read()
 
-        tree = ast.parse(content, filename=str(filepath))
+        tree = ast.parse(source, filename=str(filepath))
+    except SyntaxError as e:
+        print(f"Syntax error in {filepath}: {e}", file=sys.stderr)
+        return {}
     except Exception as e:
-        print(f"Warning: Could not parse {filepath}: {e}", file=sys.stderr)
-        return []
+        print(f"Error parsing {filepath}: {e}", file=sys.stderr)
+        return {}
 
-    module_name = get_module_name_from_path(filepath, source_root)
-    types = []
+    # Derive module FQN and unit ID
+    module_fqn = derive_fqn(filepath, source_root)
+    unit_id = generate_unit_id(module_fqn)
 
-    def visit_node(node, parent_name=None):
-        """Recursively visit AST nodes to find classes and functions."""
-        current_name = parent_name
+    # Visit AST and collect mappings
+    visitor = CallableIDVisitor(unit_id, module_fqn)
+    visitor.visit(tree)
 
-        if isinstance(node, ast.ClassDef):
-            qualified_name = f"{module_name}.{node.name}" if not parent_name else f"{parent_name}.{node.name}"
-            types.append(qualified_name)
-            current_name = qualified_name
-
-            # Visit nested classes and methods
-            for child in node.body:
-                visit_node(child, current_name)
-
-        elif isinstance(node, ast.FunctionDef):
-            if parent_name:
-                # Method inside a class
-                qualified_name = f"{parent_name}.{node.name}"
-            else:
-                # Top-level function
-                qualified_name = f"{module_name}.{node.name}"
-            types.append(qualified_name)
-
-        elif isinstance(node, ast.AsyncFunctionDef):
-            if parent_name:
-                qualified_name = f"{parent_name}.{node.name}"
-            else:
-                qualified_name = f"{module_name}.{node.name}"
-            types.append(qualified_name)
-
-    # Visit all top-level nodes
-    for node in tree.body:
-        visit_node(node)
-
-    return types
+    return visitor.mappings
 
 
-def extract_all_types(source_root: Path) -> Set[str]:
-    """
-    Extract all types from all Python files in the source root.
-    Returns a set of fully qualified type names.
-    """
-    all_types = set()
-
-    if not source_root.exists():
-        print(f"Error: Source root '{source_root}' does not exist", file=sys.stderr)
-        sys.exit(1)
-
-    if not source_root.is_dir():
-        print(f"Error: Source root '{source_root}' is not a directory", file=sys.stderr)
-        sys.exit(1)
-
-    # Find all Python files, filtering out excluded directories
-    python_files = [
-        f for f in source_root.rglob("*.py")
-        if not should_skip_path(f) and f.name != "__init__.py"
-    ]
-
-    if not python_files:
-        print(f"Warning: No Python files found in '{source_root}'", file=sys.stderr)
-        return all_types
-
-    print(f"Scanning {len(python_files)} Python files...")
-
-    for py_file in python_files:
-        types = extract_types_from_file(py_file, source_root)
-        all_types.update(types)
-
-    return all_types
-
-
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Extract all types from a Python project for integration categorization",
+        description="Generate callable ID inventory for a Python project",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:
-  %(prog)s /path/to/project --source-root src --output-root dist/inspect
+  %(prog)s src --output dist/inspect/callable-inventory.txt
+
+Output format:
+  Each line: <fully_qualified_name>:<callable_id>
+
+  Example:
+    project.model.WheelKey:U12345678_C001
+    project.model.WheelKey.__init__:U12345678_C001_M001
+    project.model.WheelKey.identifier:U12345678_C001_M002
         """
     )
 
     parser.add_argument(
-        'project_root',
+        'source_root',
         type=Path,
-        help='Project root directory'
+        help='Source root directory containing Python files'
     )
     parser.add_argument(
-        '--source-root',
-        type=str,
-        default='src',
-        help='Source root relative to project root (default: "src")'
-    )
-    parser.add_argument(
-        '--output-root',
-        type=str,
-        default='dist/inspect',
-        help='Output root relative to project root (default: "dist/inspect")'
+        '--output',
+        '-o',
+        type=Path,
+        required=True,
+        help='Output file path for callable inventory'
     )
 
     args = parser.parse_args()
 
-    project_root = args.project_root.absolute()
-    source_root = project_root / args.source_root
-
+    source_root = args.source_root.resolve()
     if not source_root.exists():
         print(f"Error: Source root not found: {source_root}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
-    # Extract types
-    all_types = extract_all_types(source_root)
+    if not source_root.is_dir():
+        print(f"Error: Source root is not a directory: {source_root}", file=sys.stderr)
+        return 1
 
-    # Sort for consistent output
-    sorted_types = sorted(all_types)
+    # Find all Python files
+    py_files = sorted(source_root.rglob("*.py"))
+    py_files = [f for f in py_files if f.name != "__init__.py"]
 
-    print(f"Found {len(sorted_types)} types")
+    if not py_files:
+        print(f"Warning: No Python files found in {source_root}", file=sys.stderr)
+        return 1
 
-    # Output to project-inventory.txt in output-root
-    output_root = project_root / args.output_root
-    output_root.mkdir(parents=True, exist_ok=True)
-    output_file = output_root / "project-inventory.txt"
+    print(f"Processing {len(py_files)} Python files...")
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for type_name in sorted_types:
-            f.write(f"{type_name}\n")
+    # Collect all mappings
+    all_mappings: Dict[str, str] = {}
+    for py_file in py_files:
+        mappings = process_file(py_file, source_root)
+        all_mappings.update(mappings)
 
-    print(f"Wrote project inventory to {output_file}")
+    print(f"Found {len(all_mappings)} callables")
+
+    # Sort by FQN for consistent output
+    sorted_mappings = sorted(all_mappings.items())
+
+    # Write to output file
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.output, 'w', encoding='utf-8') as f:
+        for fqn, callable_id in sorted_mappings:
+            f.write(f"{fqn}:{callable_id}\n")
+
+    print(f"Wrote callable inventory to {args.output}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

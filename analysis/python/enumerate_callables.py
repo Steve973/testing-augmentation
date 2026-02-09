@@ -197,11 +197,25 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     continue
 
                 integration_eis = line_to_eis[line]
-                all_paths: list[list[str]] = []
 
-                # All EIs on same line represent the same integration point
-                # Just enumerate to the first EI (they share the same prefix path)
-                target_ei = integration_eis[0]
+                # Match integration signature to correct EI on this line
+                target_ei = None
+                integration_sig = integration.get('signature', '').strip()
+
+                # Find which EI matches this integration's signature
+                for ei_id in integration_eis:
+                    matching_branch = next((b for b in branches if b.id == ei_id), None)
+                    if matching_branch:
+                        ei_text = f"{matching_branch.condition} {matching_branch.outcome}"
+                        if integration_sig in ei_text:
+                            target_ei = ei_id
+                            break
+
+                # Fallback to first EI if no match
+                if target_ei is None:
+                    target_ei = integration_eis[0]
+
+                all_paths: list[list[str]] = []
                 for start_ei in entry_eis:
                     paths = enumerate_paths(graph, start_ei, target_ei)
                     all_paths.extend(paths)

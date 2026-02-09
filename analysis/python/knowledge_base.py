@@ -85,6 +85,12 @@ FILESYSTEM_OPERATIONS = {
         'can_raise': True,
         'exceptions': ['FileNotFoundError', 'PermissionError', 'OSError']
     },
+    'pathlib.Path.resolve': {
+    'kind': 'filesystem',
+    'operation': 'read',
+    'can_raise': True,
+    'exceptions': ['OSError', 'RuntimeError']
+    },
     'pathlib.Path.open': {
         'kind': 'filesystem',
         'operation': 'read/write',
