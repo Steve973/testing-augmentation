@@ -19,6 +19,54 @@ from callable_id_generation import generate_function_id, generate_ei_id
 from models import Branch
 
 
+def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
+    """
+    Load callable inventory file (FQN:ID pairs).
+
+    Returns:
+        Dict mapping fully qualified names to callable IDs
+    """
+    inventory = {}
+    print(f"inventory file path: {filepath}")
+    if not filepath or not filepath.exists():
+        return inventory
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or ':' not in line:
+                continue
+            fqn, callable_id = line.split(':', 1)
+            inventory[fqn] = callable_id
+
+    return inventory
+
+
+def derive_fqn_from_path(filepath: Path, source_root: Path | None) -> str:
+    """
+    Convert file path to module FQN.
+
+    Example:
+        src/project/model/keys.py -> project.model.keys
+    """
+    if not source_root:
+        return filepath.stem
+
+    try:
+        relative = filepath.relative_to(source_root)
+    except ValueError:
+        # filepath not relative to source_root, use name only
+        return filepath.stem
+
+    parts = list(relative.parts[:-1]) + [relative.stem]
+
+    # Remove __init__ from end
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+
+    return ".".join(parts)
+
+
 # ============================================================================
 # Operation Extraction
 # ============================================================================
@@ -579,8 +627,77 @@ def enumerate_function_eis(
 # File Processing
 # ============================================================================
 
-def enumerate_file(filepath: Path, unit_id: str, function_name: str | None = None) -> list[FunctionResult]:
-    """Enumerate EIs for all functions in a file (or just one)."""
+class CallableFinder(ast.NodeVisitor):
+    """Find all callables with proper FQN tracking."""
+
+    def __init__(self, module_fqn: str, source_lines: list[str], inventory: dict[str, str], unit_id: str,
+                 target_name: str | None):
+        self.module_fqn = module_fqn
+        self.source_lines = source_lines
+        self.inventory = inventory
+        self.unit_id = unit_id
+        self.target_name = target_name
+        self.results: list[FunctionResult] = []
+        self.fqn_stack = [module_fqn] if module_fqn else []
+        self.func_counter = 1
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        # Push class onto FQN stack
+        self.fqn_stack.append(node.name)
+
+        # Visit children (methods)
+        self.generic_visit(node)
+
+        # Pop class
+        self.fqn_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._process_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._process_function(node)
+
+    def _process_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        # Skip if we're looking for a specific function
+        if self.target_name and node.name != self.target_name:
+            return
+
+        # Build FQN
+        if self.fqn_stack:
+            fqn = f"{'.'.join(self.fqn_stack)}.{node.name}"
+        else:
+            fqn = node.name
+
+        # Get callable ID from inventory or generate
+        callable_id = self.inventory.get(fqn)
+        if not callable_id:
+            callable_id = generate_function_id(self.unit_id, self.func_counter)
+            print(f"Warning: {fqn} not in inventory, generated {callable_id}")
+
+        # Enumerate EIs for this callable
+        result = enumerate_function_eis(node, self.source_lines, callable_id)
+        self.results.append(result)
+
+        self.func_counter += 1
+
+
+def enumerate_file(
+        filepath: Path,
+        unit_id: str,
+        function_name: str | None = None,
+        callable_inventory: dict[str, str] | None = None,
+        module_fqn: str | None = None
+) -> list[FunctionResult]:
+    """
+    Enumerate EIs for all functions in a file (or just one).
+
+    Args:
+        filepath: Path to Python file
+        unit_id: Unit ID (fallback if inventory not available)
+        function_name: Optional specific function to enumerate
+        callable_inventory: Dict of FQN -> callable ID
+        module_fqn: Module fully qualified name
+    """
 
     with open(filepath, 'r', encoding='utf-8') as f:
         source = f.read()
@@ -588,25 +705,13 @@ def enumerate_file(filepath: Path, unit_id: str, function_name: str | None = Non
     source_lines = source.split('\n')
     tree = ast.parse(source)
 
-    results: list[FunctionResult] = []
-    func_counter = 1
+    inventory = callable_inventory or {}
 
-    # Walk the AST to find all functions
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # Skip if we're looking for a specific function
-            if function_name and node.name != function_name:
-                continue
+    # Use visitor to track class context
+    finder = CallableFinder(module_fqn or "", source_lines, inventory, unit_id, function_name)
+    finder.visit(tree)
 
-            # Generate callable ID using provided unit_id
-            callable_id = generate_function_id(unit_id, func_counter)
-
-            result = enumerate_function_eis(node, source_lines, callable_id)
-            results.append(result)
-
-            func_counter += 1
-
-    return results
+    return finder.results
 
 
 def format_for_yaml(results: list[FunctionResult]) -> dict[str, Any]:
@@ -660,6 +765,8 @@ Examples:
     parser.add_argument('file', type=Path, help='Python source file')
     parser.add_argument('--unit-id', '-u', required=True, help='Unit ID (required)')
     parser.add_argument('--function', '-f', help='Specific function name to enumerate')
+    parser.add_argument('--callable-inventory', type=Path, help='Callable inventory file (FQN:ID pairs)')
+    parser.add_argument('--source-root', type=Path, help='Source root for deriving FQN')
     parser.add_argument('--text', action='store_true', help='Output human-readable text instead of YAML')
     parser.add_argument('--output', '-o', type=Path, help='Save output to file')
 
@@ -669,8 +776,16 @@ Examples:
         print(f"Error: File not found: {args.file}")
         return 1
 
+    # Load callable inventory if provided
+    inventory = load_callable_inventory(args.callable_inventory) if args.callable_inventory else {}
+
+    # Derive module FQN if source root provided
+    module_fqn = None
+    if args.source_root:
+        module_fqn = derive_fqn_from_path(args.file, args.source_root)
+
     # Enumerate
-    results = enumerate_file(args.file, args.unit_id, args.function)
+    results = enumerate_file(args.file, args.unit_id, args.function, inventory, module_fqn)
 
     if not results:
         if args.function:

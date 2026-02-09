@@ -83,7 +83,7 @@ def analyze_project(
         return False
 
     # Output directories
-    inspect_output = project_root / output_root / "inspect"
+    inspect_output = project_root / output_root / "inspect" / "callable-inventory.txt"
     eis_output = project_root / output_root / "eis"
     inventory_output = project_root / output_root / "inventory"
     ledgers_output = project_root / output_root / "ledgers"
@@ -105,9 +105,8 @@ def analyze_project(
         cmd = [
             sys.executable,
             str(inspect_script),
-            str(project_root),
-            "--source-root", source_root,
-            "--output-root", str(inspect_output.relative_to(project_root))
+            str(source_root),
+            "--output", str(inspect_output.relative_to(project_root))
         ]
         if not run_command(cmd, "Stage 1: Inspect Units"):
             return False
@@ -141,6 +140,8 @@ def analyze_project(
             sys.executable,
             str(enumerate_eis_script),
             str(py_file),
+            "--callable-inventory", str(inspect_output.relative_to(project_root)),
+            "--source-root", str(source_path),
             "--unit-id", generate_unit_id(derive_fqn(py_file, source_path)),
             "--output", str(output_file)
         ]
@@ -155,12 +156,6 @@ def analyze_project(
             print(f"  ✓ {output_file.relative_to(project_root)}")
 
     print(f"\n✓ Completed: Stage 2")
-
-    # Check for project inventory
-    project_inventory_file = inspect_output / "project-inventory.txt"
-    if not project_inventory_file.exists():
-        project_inventory_file = None
-        print(f"Note: No project-inventory.txt found, integrations may be categorized as unknown\n")
 
     # Stage 3: enumerate_callables (per-file processing)
     enumerate_callables_script = Path(__file__).parent / "enumerate_callables.py"
@@ -187,13 +182,11 @@ def analyze_project(
             str(enumerate_callables_script),
             "--file", str(py_file),
             "--fqn", fqn,
+            "--callable-inventory", str(inspect_output),
             "--unit-id", generate_unit_id(fqn),
             "--output-root", str(inventory_output),
             "--ei-root", str(eis_output)
         ]
-
-        if project_inventory_file:
-            cmd.extend(["--project-inventory", str(project_inventory_file)])
 
         print(f"Processing: {rel_path}")
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -203,8 +196,6 @@ def analyze_project(
             print(result.stderr)
         else:
             print(f"  ✓ Inventory generated")
-
-        print(f"result: {result.stdout}")
 
     print(f"\n✓ Completed: Stage 3")
 
@@ -233,11 +224,9 @@ def analyze_project(
                 sys.executable,
                 str(inventory_to_ledger_script),
                 "--inventory", str(inventory_file),
+                "--project-inventory", str(inspect_output),  # ADD THIS LINE
                 "--output", str(ledger_file)
             ]
-
-            if project_inventory_file:
-                cmd.extend(["--project-inventory", str(project_inventory_file)])
 
             print(f"Processing: {rel_path}")
             result = subprocess.run(cmd, capture_output=True, text=True)

@@ -86,10 +86,16 @@ FILESYSTEM_OPERATIONS = {
         'exceptions': ['FileNotFoundError', 'PermissionError', 'OSError']
     },
     'pathlib.Path.resolve': {
-    'kind': 'filesystem',
-    'operation': 'read',
-    'can_raise': True,
-    'exceptions': ['OSError', 'RuntimeError']
+        'kind': 'filesystem',
+        'operation': 'read',
+        'can_raise': True,
+        'exceptions': ['OSError', 'RuntimeError']
+    },
+    'pathlib.Path.relative_to': {
+        'kind': 'filesystem',
+        'operation': 'read',
+        'can_raise': True,
+        'exceptions': ['ValueError', 'OSError']
     },
     'pathlib.Path.open': {
         'kind': 'filesystem',
@@ -316,8 +322,12 @@ BOUNDARY_OPERATIONS = {
     **SUBPROCESS_OPERATIONS,
 }
 
-
 STDLIB_CLASSES = {
+    # Built-in types (not technically stdlib but treated as such for classification)
+    'str', 'int', 'float', 'bool', 'bytes', 'bytearray',
+    'list', 'tuple', 'dict', 'set', 'frozenset',
+    'range', 'enumerate', 'zip', 'filter', 'map',
+
     # pathlib
     'Path', 'PurePath', 'PosixPath', 'WindowsPath', 'PurePosixPath', 'PureWindowsPath',
 

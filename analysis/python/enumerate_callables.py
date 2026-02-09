@@ -15,10 +15,32 @@ from callable_id_generation import (
     generate_class_id,
     generate_function_id,
     generate_nested_function_id,
-    generate_method_id, generate_nested_class_id
+    generate_method_id
 )
 from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
 from models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
+
+
+def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
+    """
+    Load callable inventory file (FQN:ID pairs).
+
+    Returns:
+        Dict mapping fully qualified names to callable IDs
+    """
+    inventory = {}
+    if not filepath or not filepath.exists():
+        return inventory
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or ':' not in line:
+                continue
+            fqn, callable_id = line.split(':', 1)
+            inventory[fqn] = callable_id
+
+    return inventory
 
 
 # ============================================================================
@@ -241,18 +263,57 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
 class EnhancedCallableEnumerator(ast.NodeVisitor):
     """Enumerate callables with complete structural analysis."""
 
-    def __init__(self, source: str, unit_id: str) -> None:
+    def __init__(self, source: str, unit_id: str, module_fqn: str | None = None,
+                 callable_inventory: dict[str, str] | None = None) -> None:
         self.source = source
         self.unit_id = unit_id
+        self.module_fqn = module_fqn or ""
+        self.callable_inventory = callable_inventory or {}
         self.source_lines = source.split('\n')
         self.function_counter = 0
         self.class_counter = 0
         self.method_counters: dict[str, int] = {}
         self.context_stack: list[str] = [unit_id]  # Track current nesting: [unit_id, class_id, method_id, ...]
+        self.fqn_stack: list[str] = [module_fqn] if module_fqn else []  # Track FQN stack
         self.entries: list[CallableEntry] = []  # Store CallableEntry objects
         self.import_map = {}  # bare_name -> FQN
         self.interunit_imports = set()  # FQNs that are from the project
         self.local_symbols: set[str] = set()  # All callables defined in this unit
+
+    def _get_callable_id(self, node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef, context: str) -> str:
+        """
+        Get callable ID from inventory or generate it.
+
+        Args:
+            node: AST node
+            context: "class" | "method" | "function"
+
+        Returns:
+            Callable ID
+        """
+        # Build FQN
+        if self.fqn_stack:
+            fqn = f"{'.'.join(self.fqn_stack)}.{node.name}"
+        else:
+            fqn = f"{self.module_fqn}.{node.name}" if self.module_fqn else node.name
+
+        # Try inventory first
+        if fqn in self.callable_inventory:
+            return self.callable_inventory[fqn]
+
+        # Fallback: generate ID
+        if context == "class":
+            self.class_counter += 1
+            return generate_class_id(self.unit_id, self.class_counter)
+        elif context == "method":
+            parent_id = self.context_stack[-1]
+            self.method_counters[parent_id] += 1
+            return generate_method_id(parent_id, self.method_counters[parent_id])
+        elif context == "function":
+            self.function_counter += 1
+            return generate_function_id(self.unit_id, self.function_counter)
+        else:
+            raise ValueError(f"Unknown context: {context}")
 
     def build_import_map(self, tree: ast.Module, project_fqns: set[str]) -> None:
         for node in ast.walk(tree):
@@ -293,16 +354,10 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Visit a class definition."""
-        self.class_counter += 1
         parent_id = self.context_stack[-1]
 
-        # Generate class ID based on nesting depth
-        if parent_id == self.unit_id:
-            # Top-level class
-            class_id = generate_class_id(self.unit_id, self.class_counter)
-        else:
-            # Nested class - append to parent
-            class_id = generate_nested_class_id(parent_id, self.class_counter)
+        # Get class ID from inventory or generate
+        class_id = self._get_callable_id(node, "class")
 
         # Check if this is an enum
         is_enum = any(
@@ -325,6 +380,10 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         # Push this class onto context stack
         self.context_stack.append(class_id)
+        if self.fqn_stack:
+            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
+        else:
+            self.fqn_stack.append(f"{self.module_fqn}.{node.name}" if self.module_fqn else node.name)
 
         # Visit methods in this class
         self.method_counters[class_id] = 0
@@ -334,14 +393,15 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         # Pop class from context stack
         self.context_stack.pop()
+        if self.fqn_stack:
+            self.fqn_stack.pop()
 
         # Don't call generic_visit - we've handled children explicitly
 
     def _visit_method(self, node: ast.FunctionDef | ast.AsyncFunctionDef, parent_id: str) -> None:
         """Visit a method inside a class."""
-        self.method_counters[parent_id] += 1
-        method_num = self.method_counters[parent_id]
-        method_id = generate_method_id(parent_id, method_num)
+        # Get method ID from inventory or generate
+        method_id = self._get_callable_id(node, "method")
 
         # Analyze this method as a callable
         entry = self._analyze_callable(node, method_id, is_method=True)
@@ -354,11 +414,15 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         # Check for nested functions
         self.context_stack.append(method_id)
+        if self.fqn_stack:
+            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 # This is a nested function
                 self._visit_nested_function(item, method_id)
         self.context_stack.pop()
+        if self.fqn_stack:
+            self.fqn_stack.pop()
 
     def _visit_nested_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, parent_id: str) -> None:
         """Visit a nested function."""
@@ -387,19 +451,23 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         if len(self.context_stack) > 1:
             return  # Inside a class, handled by _visit_method
 
-        self.function_counter += 1
-        func_id = generate_function_id(self.unit_id, self.function_counter)
+        # Get function ID from inventory or generate
+        func_id = self._get_callable_id(node, "function")
         entry = self._analyze_callable(node, func_id, is_method=False)
         self.entries.append(entry)
 
         # Check for nested functions
         self.context_stack.append(func_id)
+        if self.fqn_stack:
+            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
+        elif self.module_fqn:
+            self.fqn_stack.append(f"{self.module_fqn}.{node.name}")
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 self._visit_nested_function(item, func_id)
         self.context_stack.pop()
-
-        # Don't call generic_visit
+        if self.fqn_stack:
+            self.fqn_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         """Visit an async function definition."""
@@ -407,18 +475,24 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         if len(self.context_stack) > 1:
             return
 
-        self.function_counter += 1
-        func_id = generate_function_id(self.unit_id, self.function_counter)
+        # Get function ID from inventory or generate
+        func_id = self._get_callable_id(node, "function")
 
         entry = self._analyze_callable(node, func_id, is_method=False)
         self.entries.append(entry)
 
         # Check for nested functions
         self.context_stack.append(func_id)
+        if self.fqn_stack:
+            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
+        elif self.module_fqn:
+            self.fqn_stack.append(f"{self.module_fqn}.{node.name}")
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 self._visit_nested_function(item, func_id)
         self.context_stack.pop()
+        if self.fqn_stack:
+            self.fqn_stack.pop()
 
     def _analyze_callable(
             self,
@@ -818,7 +892,7 @@ def process_file(
         inventory_path: Path,
         unit_id: str,
         output_root: Path,
-        ei_root: Path | None = None
+        ei_root: Path | None = None,
 ) -> dict[str, Any]:
     """Process a Python file and generate inventory."""
 
@@ -827,7 +901,15 @@ def process_file(
         for line in f:
             line = line.strip()
             if line and not line.startswith('#'):
-                project_types.add(line)
+                # Handle both old format (FQN only) and new format (FQN:ID)
+                if ':' in line:
+                    fqn_part = line.split(':', 1)[0]
+                    project_types.add(fqn_part)
+                else:
+                    project_types.add(line)
+
+    # Load callable inventory if provided
+    callable_inventory = load_callable_inventory(inventory_path) if inventory_path else {}
 
     # Read source
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -841,7 +923,7 @@ def process_file(
         return {}
 
     # Enumerate callables
-    enumerator = EnhancedCallableEnumerator(source, unit_id)
+    enumerator = EnhancedCallableEnumerator(source, unit_id, fqn, callable_inventory)
     enumerator.entries = []  # Initialize entries list
     enumerator.build_import_map(tree, project_types)
     enumerator.build_symbol_table(tree)  # Build symbol table for same-unit filtering
@@ -966,7 +1048,7 @@ def main() -> int:
 
     parser.add_argument('--file', type=Path, required=True, help='Python source file')
     parser.add_argument('--fqn', type=str, required=True, help='Fully qualified name')
-    parser.add_argument('--project-inventory', type=Path, help='Path to project type inventory file')
+    parser.add_argument('--callable-inventory', type=Path, help='Path to callable inventory file (FQN:ID pairs)')
     parser.add_argument('--unit-id', type=str, required=True, help='Unique ID for unit')
     parser.add_argument('--output-root', type=Path, default=Path('dist/inventory'),
                         help='Root directory for inventory output')
@@ -981,7 +1063,7 @@ def main() -> int:
     print(f"Processing: {args.file}")
     print(f"  → FQN: {args.fqn}")
 
-    process_file(args.file, args.fqn, args.project_inventory, args.unit_id, args.output_root, args.ei_root)
+    process_file(args.file, args.fqn, args.callable_inventory, args.unit_id, args.output_root, args.ei_root)
 
     return 0
 

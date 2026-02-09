@@ -9,12 +9,60 @@ the three-document ledger format required by the specification.
 from __future__ import annotations
 
 import argparse
+import ast
 import sys
 import yaml
 from pathlib import Path
 from typing import Any
 
 from models import CallableEntry, IntegrationCategory
+
+
+# =============================================================================
+# Type Tracking
+# =============================================================================
+
+def extract_known_types(filepath: Path) -> dict[str, str]:
+    """
+    Extract type information from source file.
+
+    Returns dict mapping variable names to their types.
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        source = f.read()
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+
+    known_types: dict[str, str] = {}
+
+    class TypeTracker(ast.NodeVisitor):
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            """Capture annotated assignments: x: int = 5"""
+            if isinstance(node.target, ast.Name) and isinstance(node.annotation, ast.Name):
+                known_types[node.target.id] = node.annotation.id
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            """Capture parameter type hints"""
+            for param in node.args.args:
+                if param.annotation and isinstance(param.annotation, ast.Name):
+                    known_types[param.arg] = param.annotation.id
+            self.generic_visit(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            """Capture parameter type hints in async functions"""
+            for param in node.args.args:
+                if param.annotation and isinstance(param.annotation, ast.Name):
+                    known_types[param.arg] = param.annotation.id
+            self.generic_visit(node)
+
+    tracker = TypeTracker()
+    tracker.visit(tree)
+
+    return known_types
 
 
 # =============================================================================
@@ -81,7 +129,8 @@ def generate_derived_ids_doc(
 
 def transform_entry_to_ledger(
         entry: CallableEntry,
-        project_types: set[str]
+        project_types: set[str],
+        known_types: dict[str, str]
 ) -> dict[str, Any]:
     """Transform a CallableEntry to ledger Entry format."""
 
@@ -109,13 +158,13 @@ def transform_entry_to_ledger(
 
     # Handle callable-specific fields
     if entry.needs_callable_analysis:
-        callable_spec = entry.to_ledger_callable_spec(project_types)
+        callable_spec = entry.to_ledger_callable_spec(project_types, known_types)
         ledger_entry['callable'] = callable_spec
 
     # Recursively transform children
     if entry.children:
         ledger_entry['children'] = [
-            transform_entry_to_ledger(child, project_types)
+            transform_entry_to_ledger(child, project_types, known_types)
             for child in entry.children
         ]
 
@@ -126,13 +175,14 @@ def generate_ledger_doc(
         unit_id: str,
         unit_name: str,
         entries: list[CallableEntry],
-        project_types: set[str]
+        project_types: set[str],
+        known_types: dict[str, str]
 ) -> dict[str, Any]:
     """Generate Document 2: Ledger."""
 
     # Transform all entries
     ledger_entries = [
-        transform_entry_to_ledger(entry, project_types)
+        transform_entry_to_ledger(entry, project_types, known_types)
         for entry in entries
     ]
 
@@ -159,7 +209,8 @@ def generate_review_doc(
         unit_name: str,
         language: str,
         entries: list[CallableEntry],
-        project_types: set[str]
+        project_types: set[str],
+        known_types: dict[str, str]
 ) -> dict[str, Any]:
     """Generate Document 3: Ledger Generation Review."""
 
@@ -185,7 +236,7 @@ def generate_review_doc(
                 total_eis += len(entry.branches)
 
                 # Categorize integrations
-                categorized = entry.categorize_integrations(project_types)
+                categorized = entry.categorize_integrations(project_types, known_types)
                 for category_str, facts in categorized.items():
                     category = IntegrationCategory(category_str)
                     integration_counts[category] += len(facts)
@@ -241,7 +292,7 @@ def load_project_types(project_inventory_path: Path | None) -> set[str]:
     """
     Load project type inventory from file.
 
-    Expected format: one fully-qualified name per line.
+    Expected format: one fully-qualified name per line or FQN:ID pairs.
     """
     if not project_inventory_path or not project_inventory_path.exists():
         return set()
@@ -251,7 +302,12 @@ def load_project_types(project_inventory_path: Path | None) -> set[str]:
         for line in f:
             line = line.strip()
             if line and not line.startswith('#'):
-                project_types.add(line)
+                # Handle FQN:ID format (split on colon)
+                if ':' in line:
+                    fqn = line.split(':', 1)[0]
+                    project_types.add(fqn)
+                else:
+                    project_types.add(line)
 
     return project_types
 
@@ -272,6 +328,12 @@ def transform_inventory_to_ledger(
     unit_name = inventory['unit']
     language = inventory['language']
     unit_id = inventory['unit_id']
+    filepath = Path(inventory['filepath'])
+
+    # Extract type information from source file
+    print(f"  → Extracting type information from source")
+    known_types = extract_known_types(filepath)
+    print(f"  → Found {len(known_types)} typed variables")
 
     # Parse entries to CallableEntry objects
     print(f"  → Parsing {len(inventory['entries'])} entries")
@@ -286,10 +348,10 @@ def transform_inventory_to_ledger(
     doc1 = generate_derived_ids_doc(unit_name, language, unit_id, entries)
 
     print("  → Generating Document 2 (Ledger)")
-    doc2 = generate_ledger_doc(unit_id, unit_name, entries, project_types)
+    doc2 = generate_ledger_doc(unit_id, unit_name, entries, project_types, known_types)
 
     print("  → Generating Document 3 (Review)")
-    doc3 = generate_review_doc(unit_name, language, entries, project_types)
+    doc3 = generate_review_doc(unit_name, language, entries, project_types, known_types)
 
     # Write three-document YAML
     print(f"  → Writing ledger: {output_path}")

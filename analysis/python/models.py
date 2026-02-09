@@ -367,16 +367,21 @@ class CallableEntry:
 
         return result
 
-    def categorize_integrations(self, project_types: set[str]) -> dict[str, list[dict[str, Any]]]:
+    def categorize_integrations(self, project_types: set[str], known_types: dict[str, str] | None = None) -> dict[
+        str, list[dict[str, Any]]]:
         """
         Categorize integration candidates into interunit/extlib/boundaries/unknown.
 
         Args:
             project_types: set of FQNs from project inventory
+            known_types: optional dict mapping variable names to their types
 
         Returns:
             dict mapping category string to a list of IntegrationFact dicts
         """
+        if known_types is None:
+            known_types = {}
+
         categorized: dict[IntegrationCategory, list[dict[str, Any]]] = {
             IntegrationCategory.INTERUNIT: [],
             IntegrationCategory.STDLIB: [],
@@ -387,10 +392,10 @@ class CallableEntry:
 
         for candidate in self.integration_candidates:
             # Check if this is actually an integration (not a non-integration)
-            if self.is_non_integration(candidate.target):
+            if self._is_non_integration(candidate.target):
                 continue  # Skip non-integrations entirely
 
-            category = self._determine_category(candidate.target, project_types)
+            category = self._determine_category(candidate.target, project_types, known_types)
             fact = candidate.to_ledger_integration_fact()
 
             # Add boundary details if it's a boundary integration
@@ -414,7 +419,8 @@ class CallableEntry:
             if facts
         }
 
-    def _determine_category(self, target: str, project_types: set[str]) -> IntegrationCategory:
+    def _determine_category(self, target: str, project_types: set[str],
+                            known_types: dict[str, str]) -> IntegrationCategory:
         """
         Determine integration category.
 
@@ -437,7 +443,7 @@ class CallableEntry:
             return IntegrationCategory.INTERUNIT
 
         # 3. STDLIB - check if it's Python standard library
-        if self._is_stdlib_call(target):
+        if self._is_stdlib_call(target, known_types):
             return IntegrationCategory.STDLIB
 
         # 4. KNOWN THIRD-PARTY LIBRARIES
@@ -447,7 +453,7 @@ class CallableEntry:
         # 5. UNKNOWN - can't determine
         return IntegrationCategory.UNKNOWN
 
-    def is_non_integration(self, target: str) -> bool:
+    def _is_non_integration(self, target: str) -> bool:
         """
         Check if target should be filtered out (not an actual integration).
 
@@ -467,19 +473,22 @@ class CallableEntry:
         if base_name in BUILTIN_METHODS:
             return True
 
-        # 3. Recursive call - function calling itself
-        # Check if target matches the callable's own name
-        if target == self.name or target.endswith(f'.{self.name}'):
-            return True
-
-        # 4. Self methods - ALWAYS filter out self.* calls
+        # 3. Self methods - ALWAYS filter out self.* calls
         # These are calls within the same class, not integration points
+        # MUST come BEFORE recursive check to avoid false positives
         if target.startswith('self.'):
             return True
 
-        # 5. cls methods - ALWAYS filter out cls.* calls
+        # 4. cls methods - ALWAYS filter out cls.* calls
         # These are class method calls within the same class
+        # MUST come BEFORE recursive check to avoid false positives
         if target.startswith('cls.'):
+            return True
+
+        # 5. Recursive call - function calling itself
+        # Check if target matches the callable's own name
+        # This comes AFTER self/cls checks to avoid matching self.same_method_name
+        if target == self.name or target.endswith(f'.{self.name}'):
             return True
 
         return False
@@ -516,6 +525,8 @@ class CallableEntry:
         if 'Path.open' in target or target.startswith('open('):
             return {'kind': 'filesystem', 'operation': 'read/write'}
         if 'Path.resolve' in target or '.resolve' in target:
+            return {'kind': 'filesystem', 'operation': 'read'}
+        if 'Path.relative_to' in target or '.relative_to' in target:
             return {'kind': 'filesystem', 'operation': 'read'}
         if '.as_posix' in target:
             return {'kind': 'filesystem', 'operation': 'access'}
@@ -581,24 +592,36 @@ class CallableEntry:
         return False
 
     @staticmethod
-    def _is_stdlib_call(target: str) -> bool:
-        """Check if target is from Python standard library."""
+    def _is_stdlib_call(target: str, known_types: dict[str, str]) -> bool:
+        """
+        Check if target is from Python standard library.
+        """
         parts = target.split('.')
         if not parts:
             return False
 
         first_part = parts[0]
 
-        # Check if it's a stdlib module
-        from knowledge_base import is_stdlib_module, STDLIB_CLASSES
-        if is_stdlib_module(first_part):
-            return True
+        # Check if it's a method call on a typed variable
+        if '.' in target and first_part in known_types:
+            receiver_type = known_types[first_part]
+            try:
+                from knowledge_base import STDLIB_CLASSES
+                if receiver_type in STDLIB_CLASSES:
+                    return True
+            except ImportError:
+                pass
 
-        # Check if it's a class from stdlib
-        if first_part in STDLIB_CLASSES:
-            return True
+        # Try importing knowledge_base
+        try:
+            from knowledge_base import is_stdlib_module
 
-        return False
+            module_name = first_part
+            return is_stdlib_module(module_name)
+        except ImportError:
+            pass
+
+        return first_part in STDLIB_CLASSES
 
     def _is_known_third_party(self, target: str) -> bool:
         """
@@ -606,16 +629,21 @@ class CallableEntry:
         """
         return any(target.startswith(f"{prefix}.") for prefix in COMMON_EXTLIB_MODULES)
 
-    def to_ledger_callable_spec(self, project_types: set[str]) -> dict[str, Any]:
+    def to_ledger_callable_spec(self, project_types: set[str], known_types: dict[str, str] | None = None) -> dict[
+        str, Any]:
         """
         Transform to ledger CallableSpec format.
 
         Args:
             project_types: set of FQNs for categorizing integrations
+            known_types: optional dict mapping variable names to their types
 
         Returns:
             dict in ledger CallableSpec format
         """
+        if known_types is None:
+            known_types = {}
+
         spec: dict[str, Any] = {
             'branches': [b.to_ledger_ei_spec() for b in self.branches]
         }
@@ -627,7 +655,7 @@ class CallableEntry:
             spec['returnType'] = self.return_type.to_dict()
 
         # Add categorized integrations
-        integration = self.categorize_integrations(project_types)
+        integration = self.categorize_integrations(project_types, known_types)
         if integration:
             spec['integration'] = integration
 
