@@ -407,6 +407,8 @@ def main() -> int:
                         help='Path to inventory YAML file')
     parser.add_argument('--project-inventory', type=Path,
                         help='Path to project type inventory file')
+    parser.add_argument('--quality-file', type=str, default=None,
+                        help='Path to quality file for additional analysis')
     parser.add_argument('--output', type=Path, required=True,
                         help='Path for output ledger YAML')
 
