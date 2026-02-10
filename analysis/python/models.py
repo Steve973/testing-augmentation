@@ -442,6 +442,20 @@ class CallableEntry:
         if self._is_project_type(target, project_types):
             return IntegrationCategory.INTERUNIT
 
+        # Check if it's a method call on a typed variable from the project
+        if '.' in target:
+            first_part = target.split('.')[0]
+            if first_part in known_types:
+                receiver_type = known_types[first_part]
+                # Check if the receiver's type is a project type
+                # Handle both short names and FQNs
+                if receiver_type in project_types:
+                    return IntegrationCategory.INTERUNIT
+                # Check if any project type contains .TypeName (as a class)
+                for pt in project_types:
+                    if f'.{receiver_type}.' in pt or pt.endswith(f'.{receiver_type}'):
+                        return IntegrationCategory.INTERUNIT
+
         # 3. STDLIB - check if it's Python standard library
         if self._is_stdlib_call(target, known_types):
             return IntegrationCategory.STDLIB
@@ -576,17 +590,22 @@ class CallableEntry:
         """
         Check if target is from project inventory.
         """
+        # Normalize: remove empty parens from constructor calls
+        # e.g., "ResolutionPolicy().to_mapping" -> "ResolutionPolicy.to_mapping"
+        normalized_target = target.replace('()', '')
+
         # Direct match
-        if target in project_types:
+        if normalized_target in project_types:
             return True
 
         # Check if target is a method/attribute of a project type
-        # e.g., target="MyClass.method" matches project_type="module.MyClass"
+        # e.g., target="MyClass.method" matches project_type="module.MyClass.method"
         for project_type in project_types:
-            if target.startswith(project_type + '.'):
+            if normalized_target.startswith(project_type + '.'):
                 return True
-            # Also check if project_type is more specific
-            if project_type.startswith(target + '.'):
+            # Check if project_type ends with the target
+            # e.g., target="WheelKey.as_tuple" matches "project.keys.WheelKey.as_tuple"
+            if project_type.endswith(normalized_target) or project_type.endswith('.' + normalized_target):
                 return True
 
         return False
@@ -611,6 +630,14 @@ class CallableEntry:
                     return True
             except ImportError:
                 pass
+
+        # Check if the target starts with a `stdlib` class name (e.g., str.encode, Path.resolve)
+        try:
+            from knowledge_base import STDLIB_CLASSES
+            if first_part in STDLIB_CLASSES and len(parts) > 1:
+                return True
+        except ImportError:
+            pass
 
         # Try importing knowledge_base
         try:

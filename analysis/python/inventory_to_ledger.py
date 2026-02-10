@@ -47,14 +47,24 @@ def extract_known_types(filepath: Path) -> dict[str, str]:
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
             """Capture parameter type hints"""
+            # Regular parameters
             for param in node.args.args:
+                if param.annotation and isinstance(param.annotation, ast.Name):
+                    known_types[param.arg] = param.annotation.id
+            # Keyword-only parameters
+            for param in node.args.kwonlyargs:
                 if param.annotation and isinstance(param.annotation, ast.Name):
                     known_types[param.arg] = param.annotation.id
             self.generic_visit(node)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
             """Capture parameter type hints in async functions"""
+            # Regular parameters
             for param in node.args.args:
+                if param.annotation and isinstance(param.annotation, ast.Name):
+                    known_types[param.arg] = param.annotation.id
+            # Keyword-only parameters
+            for param in node.args.kwonlyargs:
                 if param.annotation and isinstance(param.annotation, ast.Name):
                     known_types[param.arg] = param.annotation.id
             self.generic_visit(node)
