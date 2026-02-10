@@ -16,7 +16,14 @@ from enum import Enum
 from typing import Any
 
 from callable_id_generation import ei_id_to_integration_id
-from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS, COMMON_EXTLIB_MODULES
+from knowledge_base import (
+    BOUNDARY_OPERATIONS,
+    BUILTIN_METHODS,
+    COMMON_EXTLIB_MODULES,
+    PYTHON_BUILTINS,
+    STDLIB_CLASSES,
+    is_stdlib_module,
+)
 
 
 # =============================================================================
@@ -515,15 +522,8 @@ class CallableEntry:
         Returns:
             dict with 'kind', 'operation', 'protocol' etc, or None if not a boundary
         """
-        # Try importing knowledge_base for comprehensive boundary detection
-        try:
-            from knowledge_base import BOUNDARY_OPERATIONS
-
-            # Direct lookup in knowledge_base
-            if target in BOUNDARY_OPERATIONS:
-                return BOUNDARY_OPERATIONS[target]
-        except ImportError:
-            pass
+        if target in BOUNDARY_OPERATIONS:
+            return BOUNDARY_OPERATIONS[target]
 
         # Pattern matching for common boundary patterns
 
@@ -624,31 +624,14 @@ class CallableEntry:
         # Check if it's a method call on a typed variable
         if '.' in target and first_part in known_types:
             receiver_type = known_types[first_part]
-            try:
-                from knowledge_base import STDLIB_CLASSES
-                if receiver_type in STDLIB_CLASSES:
-                    return True
-            except ImportError:
-                pass
+            if receiver_type in STDLIB_CLASSES:
+                return True
 
         # Check if the target starts with a `stdlib` class name (e.g., str.encode, Path.resolve)
-        try:
-            from knowledge_base import STDLIB_CLASSES
-            if first_part in STDLIB_CLASSES and len(parts) > 1:
-                return True
-        except ImportError:
-            pass
+        if first_part in STDLIB_CLASSES and len(parts) > 1:
+            return True
 
-        # Try importing knowledge_base
-        try:
-            from knowledge_base import is_stdlib_module
-
-            module_name = first_part
-            return is_stdlib_module(module_name)
-        except ImportError:
-            pass
-
-        return first_part in STDLIB_CLASSES
+        return is_stdlib_module(first_part)
 
     def _is_known_third_party(self, target: str) -> bool:
         """

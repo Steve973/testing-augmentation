@@ -6,7 +6,8 @@ Orchestrates the multi-stage pipeline for analyzing Python projects:
 1. inspect_units.py - Basic unit structure
 2. enumerate_exec_items.py - EI enumeration
 3. enumerate_callables.py - Integration classification + EI merging
-4. inventory_to_ledger.py - Generate three-document ledgers
+4. analyze_code_quality.py - Code quality metrics
+5. inventory_to_ledger.py - Generate three-document ledgers with quality metrics
 """
 
 import argparse
@@ -86,6 +87,7 @@ def analyze_project(
     inspect_output = project_root / output_root / "inspect" / "callable-inventory.txt"
     eis_output = project_root / output_root / "eis"
     inventory_output = project_root / output_root / "inventory"
+    quality_output = project_root / output_root / "quality"
     ledgers_output = project_root / output_root / "ledgers"
 
     print(f"\n{'=' * 70}")
@@ -96,6 +98,7 @@ def analyze_project(
     print(f"Inspect output:    {inspect_output}")
     print(f"EIs output:        {eis_output}")
     print(f"Inventory output:  {inventory_output}")
+    print(f"Quality output:    {quality_output}")
     print(f"Ledgers output:    {ledgers_output}")
     print(f"{'=' * 70}")
 
@@ -199,10 +202,54 @@ def analyze_project(
 
     print(f"\n✓ Completed: Stage 3")
 
-    # Stage 4: Generate ledgers
+    # Stage 4: Quality Analysis
+    analyze_quality_script = Path(__file__).parent / "analyze_code_quality.py"
+    if not analyze_quality_script.exists():
+        print(f"\nℹ  Skipping Stage 4: analyze_code_quality.py not found")
+    else:
+        # Create quality output directory
+        quality_output.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n{'=' * 70}")
+        print(f"Stage 4: Quality Analysis")
+        print(f"{'=' * 70}")
+        print(f"Analyzing {len(py_files)} Python files\n")
+
+        for py_file in sorted(py_files):
+            rel_path = py_file.relative_to(source_path)
+            quality_file = quality_output / rel_path.parent / f"{py_file.stem}.quality.yaml"
+            quality_file.parent.mkdir(parents=True, exist_ok=True)
+
+            cmd = [
+                sys.executable,
+                str(analyze_quality_script),
+                str(py_file),
+                "--output", str(quality_file)
+            ]
+
+            print(f"Processing: {rel_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                print(f"  ✗ Failed")
+                if result.stderr:
+                    print(result.stderr)
+            else:
+                # Parse quality grade for quick feedback
+                try:
+                    import yaml
+                    quality_data = yaml.safe_load(quality_file.read_text())
+                    grade = quality_data.get('overallGrade', 'unknown')
+                    print(f"  ✓ Grade: {grade}")
+                except Exception:
+                    print(f"  ✓ {quality_file.relative_to(project_root)}")
+
+        print(f"\n✓ Completed: Stage 4")
+
+    # Stage 5: Generate ledgers
     inventory_to_ledger_script = Path(__file__).parent / "inventory_to_ledger.py"
     if not inventory_to_ledger_script.exists():
-        print(f"\nℹ  Skipping Stage 4: inventory_to_ledger.py not found")
+        print(f"\nℹ  Skipping Stage 5: inventory_to_ledger.py not found")
     else:
         # Create ledgers output directory
         ledgers_output.mkdir(parents=True, exist_ok=True)
@@ -211,7 +258,7 @@ def analyze_project(
         inventory_files = list(inventory_output.rglob("*.inventory.yaml"))
 
         print(f"\n{'=' * 70}")
-        print(f"Stage 4: Generate Ledgers")
+        print(f"Stage 5: Generate Ledgers")
         print(f"{'=' * 70}")
         print(f"Found {len(inventory_files)} inventory files\n")
 
@@ -220,13 +267,20 @@ def analyze_project(
             ledger_file = ledgers_output / rel_path.parent / f"{inventory_file.stem.replace('.inventory', '')}.ledger.yaml"
             ledger_file.parent.mkdir(parents=True, exist_ok=True)
 
+            # Find corresponding quality file
+            quality_file = quality_output / rel_path.parent / f"{inventory_file.stem.replace('.inventory', '')}.quality.yaml"
+
             cmd = [
                 sys.executable,
                 str(inventory_to_ledger_script),
                 "--inventory", str(inventory_file),
-                "--project-inventory", str(inspect_output),  # ADD THIS LINE
+                "--project-inventory", str(inspect_output),
                 "--output", str(ledger_file)
             ]
+
+            # Add quality file if it exists
+            if quality_file.exists():
+                cmd.extend(["--quality-file", str(quality_file)])
 
             print(f"Processing: {rel_path}")
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -238,7 +292,7 @@ def analyze_project(
             else:
                 print(f"  ✓ {ledger_file.relative_to(project_root)}")
 
-        print(f"\n✓ Completed: Stage 4")
+        print(f"\n✓ Completed: Stage 5")
 
     print(f"\n{'=' * 70}")
     print(f"✓ Analysis Complete!")
@@ -248,6 +302,8 @@ def analyze_project(
         print(f"  - Unit inspection: {inspect_output} (YAML)")
     print(f"  - EI enumeration:  {eis_output} (YAML)")
     print(f"  - Final inventory: {inventory_output} (YAML)")
+    if quality_output.exists():
+        print(f"  - Quality metrics: {quality_output} (YAML)")
     if ledgers_output.exists():
         print(f"  - Unit ledgers:    {ledgers_output} (YAML)")
     print()
@@ -264,7 +320,8 @@ Pipeline Stages:
   1. inspect_units.py        - Generate basic unit structure (optional)
   2. enumerate_exec_items.py - Enumerate execution items (EIs)
   3. enumerate_callables.py  - Classify integrations + merge EI data
-  4. inventory_to_ledger.py  - Generate three-document unit ledgers
+  4. analyze_code_quality.py - Code quality metrics (optional)
+  5. inventory_to_ledger.py  - Generate three-document unit ledgers
 
 Example:
   %(prog)s /path/to/project --source-root src --output-root dist
