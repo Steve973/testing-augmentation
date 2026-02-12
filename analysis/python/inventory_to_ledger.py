@@ -250,16 +250,26 @@ def generate_review_doc(
                 categorized = entry.categorize_integrations(project_types, known_types)
                 for category_str, facts in categorized.items():
                     category = IntegrationCategory(category_str)
+                    print(f"DEBUG: Processing category {category_str} -> {category}, has {len(facts)} integrations", file=sys.stderr)
                     integration_counts[category] += len(facts)
 
                     # Track unknown integrations for findings
                     if category == IntegrationCategory.UNKNOWN:
-                        for fact in facts:
-                            # Integration ID might not exist if no execution paths
-                            if 'id' in fact:
-                                unknown_integrations.append(fact['id'])
-                            else:
-                                unknown_integrations.append(f"{fact['target']} (no execution path)")
+                        # Skip if this entry has MechanicalOperation/UtilityOperation decorator
+                        has_mechop_or_utilop: bool = False
+                        if entry.decorators:
+                            for decorator in entry.decorators or []:
+                                if decorator.get('name') in ['MechanicalOperation', 'UtilityOperation']:
+                                    has_mechop_or_utilop = True
+                                    break
+
+                        if not has_mechop_or_utilop:
+                            for fact in facts:
+                                # Integration ID might not exist if no execution paths
+                                if 'id' in fact:
+                                    unknown_integrations.append(fact['id'])
+                                else:
+                                    unknown_integrations.append(f"{fact['target']} (no execution path)")
 
             if entry.children:
                 count_recursive(entry.children)

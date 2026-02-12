@@ -170,84 +170,141 @@ def decompose_if(stmt: ast.If, source_lines: list[str]) -> list[str]:
 
 def decompose_for(stmt: ast.For, source_lines: list[str]) -> list[str]:
     """
-    For loop: 2 EIs (0 iterations, ≥1 iterations).
-    For-else: 3 EIs (empty, completes without break, breaks).
+    For loop: EIs for operations in iterable, then 2 EIs (0 iterations, ≥1 iterations).
+    For-else: EIs for operations, then 3 EIs (empty, completes without break, breaks).
     """
+    eis = []
+
+    # Extract all operations from the iterable expression
+    operations = extract_all_operations(stmt.iter)
+
+    # Generate EIs for each operation in the iterable
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
     target = ast.unparse(stmt.target)
     iter_expr = ast.unparse(stmt.iter)
 
     if stmt.orelse:
         # For-else pattern
-        return [
+        eis.extend([
             f"for {target} in {iter_expr}: 0 iterations → else executes",
             f"for {target} in {iter_expr}: completes without break → else executes",
             f"for {target} in {iter_expr}: breaks → else skipped"
-        ]
+        ])
     else:
         # Regular for loop
-        return [
+        eis.extend([
             f"for {target} in {iter_expr}: 0 iterations",
             f"for {target} in {iter_expr}: ≥1 iterations"
-        ]
+        ])
+
+    return eis
 
 
 def decompose_while(stmt: ast.While, source_lines: list[str]) -> list[str]:
     """
-    While loop: 2 EIs (initially false, initially true).
-    While-else: 3 EIs (initially false → else, completes → else, breaks → no else).
+    While loop: EIs for operations in condition, then 2 EIs (initially false, initially true).
+    While-else: EIs for operations, then 3 EIs (initially false → else, completes → else, breaks → no else).
     """
+    eis = []
+
+    # Extract all operations from the condition
+    operations = extract_all_operations(stmt.test)
+
+    # Generate EIs for each operation in the condition
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
     condition = ast.unparse(stmt.test)
 
     if stmt.orelse:
         # While-else pattern
-        return [
+        eis.extend([
             f"while {condition}: initially false → else executes",
             f"while {condition}: completes without break → else executes",
             f"while {condition}: breaks → else skipped"
-        ]
+        ])
     else:
         # Regular while loop
-        return [
+        eis.extend([
             f"while {condition}: initially false → 0 iterations",
             f"while {condition}: initially true → ≥1 iterations"
-        ]
+        ])
+
+    return eis
 
 
 def decompose_try(stmt: ast.Try, source_lines: list[str]) -> list[str]:
     """
-    Try/except: 1 + N EIs (success + each handler).
+    Try/except: EIs for exception types, then 1 + N EIs (success + each handler).
     Try/except/else: adds 1 EI for else block.
     Finally always executes, doesn't create separate EI for branching.
     """
-    outcomes = ["try block executes successfully"]
+    eis = []
+
+    # Extract operations from exception type specifications
+    for handler in stmt.handlers:
+        if handler.type:
+            operations = extract_all_operations(handler.type)
+            for op in operations:
+                op_str = ast.unparse(op)
+                eis.append(f"executes → {op_str} succeeds")
+                eis.append(f"{op_str} raises exception → exception propagates")
+
+    eis.append("try block executes successfully")
 
     # Add EI for each exception handler
     for handler in stmt.handlers:
         if handler.type:
             exc_type = ast.unparse(handler.type)
-            outcomes.append(f"raises {exc_type} → enters except handler")
+            eis.append(f"raises {exc_type} → enters except handler")
         else:
-            outcomes.append(f"raises exception → enters except handler")
+            eis.append(f"raises exception → enters except handler")
 
     # Note: else block executes only if try succeeds (already covered by first EI)
     # Note: finally block always executes (not a branching point)
 
-    return outcomes
+    return eis
 
 
 def decompose_with(stmt: ast.With, source_lines: list[str]) -> list[str]:
-    """With statement: 2 EIs (enters successfully, raises on entry)."""
+    """With statement: EIs for context expressions, then 2 EIs (enters successfully, raises on entry)."""
+    eis = []
+
+    # Extract operations from all context expressions
+    for item in stmt.items:
+        operations = extract_all_operations(item.context_expr)
+        for op in operations:
+            op_str = ast.unparse(op)
+            eis.append(f"executes → {op_str} succeeds")
+            eis.append(f"{op_str} raises exception → exception propagates")
+
     contexts = [ast.unparse(item.context_expr) for item in stmt.items]
     context_str = ', '.join(contexts)
-    return [
+    eis.extend([
         f"with {context_str}: enters successfully",
         f"with {context_str}: raises exception on entry"
-    ]
+    ])
+
+    return eis
 
 
 def decompose_match(stmt: ast.Match, source_lines: list[str]) -> list[str]:
-    """Match statement: N EIs (one per case)."""
-    outcomes = []
+    """Match statement: EIs for subject expression, then N EIs (one per case)."""
+    eis = []
+
+    # Extract operations from the subject expression
+    operations = extract_all_operations(stmt.subject)
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
     for i, case in enumerate(stmt.cases):
         pattern = ast.unparse(case.pattern)
 
@@ -255,19 +312,31 @@ def decompose_match(stmt: ast.Match, source_lines: list[str]) -> list[str]:
         has_return = any(isinstance(node, ast.Return) for node in case.body)
 
         if has_return:
-            outcomes.append(f"match case {i + 1}: {pattern} → returns")
+            eis.append(f"match case {i + 1}: {pattern} → returns")
         else:
-            outcomes.append(f"match case {i + 1}: {pattern}")
-    return outcomes
+            eis.append(f"match case {i + 1}: {pattern}")
+
+    return eis
 
 
 def decompose_assert(stmt: ast.Assert, source_lines: list[str]) -> list[str]:
-    """Assert statement: 2 EIs (assertion holds, assertion fails)."""
+    """Assert statement: EIs for operations in test, then 2 EIs (assertion holds, assertion fails)."""
+    eis = []
+
+    # Extract operations from the assertion test
+    operations = extract_all_operations(stmt.test)
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
     test = ast.unparse(stmt.test)
-    return [
+    eis.extend([
         f"assert {test}: holds → continues",
         f"assert {test}: fails → raises AssertionError"
-    ]
+    ])
+
+    return eis
 
 
 def decompose_assignment(stmt: ast.Assign, source_lines: list[str]) -> list[str]:
@@ -303,7 +372,7 @@ def decompose_assignment(stmt: ast.Assign, source_lines: list[str]) -> list[str]
         eis = []
         for op_call in operations:
             call_str = ast.unparse(op_call)
-            eis.append(f"{call_str} succeeds")
+            eis.append(f"executes → {call_str} succeeds")
             eis.append(f"{call_str} raises exception → exception propagates")
 
         # Only add "all operations succeed" EI if there are multiple operations
@@ -313,25 +382,46 @@ def decompose_assignment(stmt: ast.Assign, source_lines: list[str]) -> list[str]
         return eis
 
     # Regular assignment (no operations)
-    return [f"executes: {line_text}"]
+    return [f"executes → {line_text}"]
 
 
 def decompose_comprehension(comp: ast.ListComp | ast.DictComp | ast.SetComp, comp_type: str, empty_repr: str) -> list[
     str]:
-    """Comprehension: 3 EIs with filter, 2 without."""
+    """Comprehension: EIs for operations in iterator/filter, then 3 EIs with filter or 2 without."""
+    eis = []
+
+    # Extract operations from the comprehension
+    for gen in comp.generators:
+        # Operations in the iterator expression
+        operations = extract_all_operations(gen.iter)
+        for op in operations:
+            op_str = ast.unparse(op)
+            eis.append(f"executes → {op_str} succeeds")
+            eis.append(f"{op_str} raises exception → exception propagates")
+
+        # Operations in filter conditions
+        for if_clause in gen.ifs:
+            operations = extract_all_operations(if_clause)
+            for op in operations:
+                op_str = ast.unparse(op)
+                eis.append(f"executes → {op_str} succeeds")
+                eis.append(f"{op_str} raises exception → exception propagates")
+
     has_filter = any(gen.ifs for gen in comp.generators)
 
     if has_filter:
-        return [
+        eis.extend([
             f"{comp_type} comprehension: source empty → {empty_repr}",
             f"{comp_type} comprehension: source has items, all filtered → {empty_repr}",
             f"{comp_type} comprehension: source has items, some pass filter → populated"
-        ]
+        ])
     else:
-        return [
+        eis.extend([
             f"{comp_type} comprehension: source empty → {empty_repr}",
             f"{comp_type} comprehension: source has items → populated"
-        ]
+        ])
+
+    return eis
 
 
 def contains_call_that_can_raise(node: ast.AST) -> tuple[bool, str | None]:
@@ -341,39 +431,85 @@ def contains_call_that_can_raise(node: ast.AST) -> tuple[bool, str | None]:
     Returns:
         (has_calls, call_description) - call_description is the unparsed call if found
     """
-    # Walk the AST to find Call nodes
-    for child in ast.walk(node):
-        if isinstance(child, ast.Call):
-            call_str = ast.unparse(child)
-            # Most function calls can potentially raise exceptions
-            # (We could be more selective here, but for now assume all can raise)
-            return True, call_str
+    operations = extract_all_operations(node)
+    if operations:
+        # Return the first operation found
+        return True, ast.unparse(operations[0])
     return False, None
 
 
 def decompose_ternary(ifexp: ast.IfExp) -> list[str]:
-    """Ternary expression: 4 EIs (condition branches + value assignments)."""
+    """Ternary expression: EIs for operations in test/body/orelse, then 4 EIs (condition branches + value assignments)."""
+    eis = []
+
+    # Extract operations from the test condition
+    operations = extract_all_operations(ifexp.test)
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
+    # Extract operations from true branch
+    operations = extract_all_operations(ifexp.body)
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
+    # Extract operations from false branch
+    operations = extract_all_operations(ifexp.orelse)
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
     condition = ast.unparse(ifexp.test)
     true_val = ast.unparse(ifexp.body)
     false_val = ast.unparse(ifexp.orelse)
-    return [
+
+    eis.extend([
         f"{condition} is true → continues to true branch",
         f"{condition} is false → continues to false branch",
         f"true branch: assigns {true_val}",
         f"false branch: assigns {false_val}"
-    ]
+    ])
+
+    return eis
 
 
 def decompose_augassign(stmt: ast.AugAssign, source_lines: list[str]) -> list[str]:
-    """Augmented assignment (+=, -=, etc.): 1 EI."""
+    """Augmented assignment (+=, -=, etc.): EIs for operations in value, then 1 EI for assignment."""
+    eis = []
+
+    # Extract operations from the value being added/subtracted/etc
+    operations = extract_all_operations(stmt.value)
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-    return [f"executes: {line_text}"]
+    eis.append(f"executes → {line_text}")
+
+    return eis
 
 
 def decompose_annassign(stmt: ast.AnnAssign, source_lines: list[str]) -> list[str]:
-    """Annotated assignment: 1 EI."""
+    """Annotated assignment: EIs for operations in value (if present), then 1 EI for assignment."""
+    eis = []
+
+    # Extract operations from the value if it exists (annotated assignments can be declaration-only)
+    if stmt.value:
+        operations = extract_all_operations(stmt.value)
+        for op in operations:
+            op_str = ast.unparse(op)
+            eis.append(f"executes → {op_str} succeeds")
+            eis.append(f"{op_str} raises exception → exception propagates")
+
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-    return [f"executes: {line_text}"]
+    eis.append(f"executes → {line_text}")
+
+    return eis
 
 
 def decompose_return(stmt: ast.Return, source_lines: list[str]) -> list[str]:
@@ -388,24 +524,34 @@ def decompose_return(stmt: ast.Return, source_lines: list[str]) -> list[str]:
             eis = []
             for op_call in operations:
                 call_str = ast.unparse(op_call)
-                eis.append(f"{call_str} succeeds")
+                eis.append(f"executes → {call_str} succeeds")
                 eis.append(f"{call_str} raises exception → exception propagates")
             # Final EI: return completes (only if all operations succeed)
             eis.append(f"all operations succeed → returns {ret_val}")
             return eis
 
-        return [f"returns {ret_val}"]
+        return [f"executes → returns {ret_val}"]
     else:
-        return ["returns None"]
+        return ["executes → returns None"]
 
 
 def decompose_raise(stmt: ast.Raise, source_lines: list[str]) -> list[str]:
-    """Raise statement: 1 EI."""
+    """Raise statement: EIs for operations in exception, then 1 EI for raise."""
+    eis = []
+
     if stmt.exc:
+        # Extract operations from exception expression
+        operations = extract_all_operations(stmt.exc)
+        for op in operations:
+            op_str = ast.unparse(op)
+            eis.append(f"executes → {op_str} succeeds")
+            eis.append(f"{op_str} raises exception → exception propagates")
+
         exc = ast.unparse(stmt.exc)
-        return [f"raises {exc}"]
+        eis.append(f"executes → raises {exc}")
+        return eis
     else:
-        return ["re-raises current exception"]
+        return ["executes → re-raises current exception"]
 
 
 def decompose_delete(stmt: ast.Delete, source_lines: list[str]) -> list[str]:
@@ -457,23 +603,23 @@ def decompose_expr(stmt: ast.Expr, source_lines: list[str]) -> list[str]:
         eis = []
         for op_call in operations:
             call_str = ast.unparse(op_call)
-            eis.append(f"{call_str} succeeds")
+            eis.append(f"executes → {call_str} succeeds")
             eis.append(f"{call_str} raises exception → exception propagates")
         return eis
 
-    return [f"executes: {line_text}"]
+    return [f"executes → {line_text}"]
 
 
 def decompose_global(stmt: ast.Global, source_lines: list[str]) -> list[str]:
     """Global statement: 1 EI."""
     names = ', '.join(stmt.names)
-    return [f"executes: global {names}"]
+    return [f"executes → global {names}"]
 
 
 def decompose_nonlocal(stmt: ast.Nonlocal, source_lines: list[str]) -> list[str]:
     """Nonlocal statement: 1 EI."""
     names = ', '.join(stmt.names)
-    return [f"executes: nonlocal {names}"]
+    return [f"executes → nonlocal {names}"]
 
 
 def decompose_asyncfor(stmt: ast.AsyncFor, source_lines: list[str]) -> list[str]:
@@ -489,7 +635,7 @@ def decompose_asyncwith(stmt: ast.AsyncWith, source_lines: list[str]) -> list[st
 def decompose_default(stmt: ast.stmt, source_lines: list[str]) -> list[str]:
     """Default decomposer for unknown statement types."""
     line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-    return [f"executes: {line_text}"]
+    return [f"executes → {line_text}"]
 
 
 # Dispatch table mapping AST node types to decomposer functions

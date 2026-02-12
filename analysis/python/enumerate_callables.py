@@ -160,10 +160,11 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
         skip_entry = False
         if entry.get('decorators'):
             for decorator in entry['decorators']:
-                if decorator.get('name') == 'MechanicalOperation':
+                if decorator.get('name') in ['MechanicalOperation', 'UtilityOperation']:
                     # Don't enumerate paths for mechanical operations
                     for integration in entry.get('ast_analysis', {}).get('integration_candidates', []):
                         integration['executionPaths'] = []
+                        integration['suppressedBy'] = decorator.get('name')
                     skip_entry = True
                     break
 
