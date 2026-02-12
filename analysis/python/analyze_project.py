@@ -18,30 +18,26 @@ from pathlib import Path
 from callable_id_generation import generate_unit_id
 
 
-def run_command(cmd: list[str], description: str, log_dir: Path = Path("/tmp/ledger")) -> bool:
+def run_command(cmd: list[str], description: str, log_dir: Path = Path("/tmp/ledger"), append: bool = False) -> bool:
     """Run a command and return success status."""
-    print(f"\n{'=' * 70}")
-    print(f"{description}")
-    print(f"{'=' * 70}")
-    print(f"Command: {' '.join(str(c) for c in cmd)}\n")
-
     Path.mkdir(log_dir, exist_ok=True, parents=True)
 
-    # Create log file name from description
-    log_name = description.lower().replace(' ', '_').replace(':', '').replace('-', '_') + '.log'
+    # Create a log file name from description
+    log_name = description.lower().replace(' ', '_').replace(':', '').replace('-', '_').split('__')[0] + '.log'
     log_file = log_dir / log_name
 
-    with open(log_file, 'w') as f:
+    if not log_file.exists():
+        print(f"\n{'=' * 70}")
+        print(f"{description}")
+        print(f"{'=' * 70}")
+        # print(f"Command: {' '.join(str(c) for c in cmd)}\n")
+
+    mode = 'a' if append else 'w'
+    with open(log_file, mode) as f:
+        if append:
+            f.write(f"\n\n{'=' * 70}\n{description}\n{'='*70}\n")
         result = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, text=True)
-
-    if result.returncode != 0:
-        print(f"\n✗ Failed: {description}")
-        print(f"   See log: {log_file}")
-        return False
-
-    print(f"\n✓ Completed: {description}")
-    print(f"   Log: {log_file}")
-    return True
+        return result.returncode == 0
 
 
 def derive_fqn(filepath: Path, source_root: Path) -> str:
@@ -89,6 +85,13 @@ def analyze_project(
     inventory_output = project_root / output_root / "inventory"
     quality_output = project_root / output_root / "quality"
     ledgers_output = project_root / output_root / "ledgers"
+    log_dir = Path("/tmp/ledger")
+
+    # Clean up old logs
+    if log_dir.exists():
+        import shutil
+        shutil.rmtree(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'=' * 70}")
     print(f"Project Analysis Pipeline")
@@ -129,9 +132,7 @@ def analyze_project(
     py_files = list(source_path.rglob("*.py"))
     py_files = [f for f in py_files if f.name != "__init__.py"]
 
-    print(f"\n{'=' * 70}")
     print(f"Stage 2: Enumerate Execution Items")
-    print(f"{'=' * 70}")
     print(f"Found {len(py_files)} Python files\n")
 
     for py_file in sorted(py_files):
@@ -150,11 +151,8 @@ def analyze_project(
         ]
 
         print(f"Processing: {rel_path}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
+        if not run_command(cmd, f"Stage 2: Enumerate Execution Items", append=True):
             print(f"  ✗ Failed")
-            print(result.stderr)
         else:
             print(f"  ✓ {output_file.relative_to(project_root)}")
 
@@ -169,9 +167,7 @@ def analyze_project(
     # Create output directory
     inventory_output.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n{'=' * 70}")
     print(f"Stage 3: Enumerate Callables + Merge EI Data")
-    print(f"{'=' * 70}")
     print(f"Processing {len(py_files)} Python files\n")
 
     for py_file in sorted(py_files):
@@ -192,11 +188,8 @@ def analyze_project(
         ]
 
         print(f"Processing: {rel_path}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
+        if not run_command(cmd, f"Stage 3: Enumerate Callables", append=True):
             print(f"  ✗ Failed")
-            print(result.stderr)
         else:
             print(f"  ✓ Inventory generated")
 
@@ -210,9 +203,7 @@ def analyze_project(
         # Create quality output directory
         quality_output.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n{'=' * 70}")
         print(f"Stage 4: Quality Analysis")
-        print(f"{'=' * 70}")
         print(f"Analyzing {len(py_files)} Python files\n")
 
         for py_file in sorted(py_files):
@@ -228,12 +219,8 @@ def analyze_project(
             ]
 
             print(f"Processing: {rel_path}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode != 0:
+            if not run_command(cmd, f"Stage 4: Quality Analysis", append=True):
                 print(f"  ✗ Failed")
-                if result.stderr:
-                    print(result.stderr)
             else:
                 # Parse quality grade for quick feedback
                 try:
@@ -257,9 +244,7 @@ def analyze_project(
         # Find all inventory files
         inventory_files = list(inventory_output.rglob("*.inventory.yaml"))
 
-        print(f"\n{'=' * 70}")
         print(f"Stage 5: Generate Ledgers")
-        print(f"{'=' * 70}")
         print(f"Found {len(inventory_files)} inventory files\n")
 
         for inventory_file in sorted(inventory_files):
@@ -283,12 +268,8 @@ def analyze_project(
                 cmd.extend(["--quality-file", str(quality_file)])
 
             print(f"Processing: {rel_path}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode != 0:
+            if not run_command(cmd, f"Stage 5: Generate Ledgers", append=True):
                 print(f"  ✗ Failed")
-                if result.stderr:
-                    print(result.stderr)
             else:
                 print(f"  ✓ {ledger_file.relative_to(project_root)}")
 

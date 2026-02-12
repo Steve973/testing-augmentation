@@ -220,7 +220,8 @@ def generate_review_doc(
         language: str,
         entries: list[CallableEntry],
         project_types: set[str],
-        known_types: dict[str, str]
+        known_types: dict[str, str],
+        quality_metrics: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Generate Document 3: Ledger Generation Review."""
 
@@ -277,7 +278,7 @@ def generate_review_doc(
             'recommendedAction': 'Review unknown integrations and update project type inventory or categorization rules'
         })
 
-    return {
+    review_doc = {
         'docKind': 'ledger-generation-review',
         'schemaVersion': '1.0.0',
         'unit': {
@@ -292,6 +293,17 @@ def generate_review_doc(
         },
         'findings': findings
     }
+
+    # Merge quality metrics if provided
+    if quality_metrics:
+        review_doc['qualityMetrics'] = quality_metrics.get('metrics', {})
+    review_doc['overallQualityGrade'] = quality_metrics.get('overallGrade', 'unknown')
+
+    # Add flagged callables if present
+    if quality_metrics.get('flaggedCallables'):
+        review_doc['qualityFlags'] = quality_metrics['flaggedCallables']
+
+    return review_doc
 
 
 # =============================================================================
@@ -325,6 +337,7 @@ def load_project_types(project_inventory_path: Path | None) -> set[str]:
 def transform_inventory_to_ledger(
         inventory_path: Path,
         project_inventory_path: Path | None,
+        quality_file_path: Path | None,
         output_path: Path
 ) -> None:
     """Transform inventory YAML to three-document ledger YAML."""
@@ -353,6 +366,14 @@ def transform_inventory_to_ledger(
     project_types = load_project_types(project_inventory_path)
     print(f"  → Loaded {len(project_types)} project types")
 
+    # Load quality metrics if provided
+    quality_metrics = None
+    if quality_file_path and quality_file_path.exists():
+        print(f"  → Loading quality metrics from {quality_file_path}")
+        with open(quality_file_path, 'r', encoding='utf-8') as f:
+            quality_metrics = yaml.safe_load(f)
+        print(f"  → Quality grade: {quality_metrics.get('overallGrade', 'unknown')}")
+
     # Generate three documents
     print("  → Generating Document 1 (Derived IDs)")
     doc1 = generate_derived_ids_doc(unit_name, language, unit_id, entries)
@@ -361,7 +382,7 @@ def transform_inventory_to_ledger(
     doc2 = generate_ledger_doc(unit_id, unit_name, entries, project_types, known_types)
 
     print("  → Generating Document 3 (Review)")
-    doc3 = generate_review_doc(unit_name, language, entries, project_types, known_types)
+    doc3 = generate_review_doc(unit_name, language, entries, project_types, known_types, quality_metrics)
 
     # Write three-document YAML
     print(f"  → Writing ledger: {output_path}")
@@ -407,7 +428,7 @@ def main() -> int:
                         help='Path to inventory YAML file')
     parser.add_argument('--project-inventory', type=Path,
                         help='Path to project type inventory file')
-    parser.add_argument('--quality-file', type=str, default=None,
+    parser.add_argument('--quality-file', type=Path, default=None,
                         help='Path to quality file for additional analysis')
     parser.add_argument('--output', type=Path, required=True,
                         help='Path for output ledger YAML')
@@ -422,6 +443,7 @@ def main() -> int:
         transform_inventory_to_ledger(
             args.inventory,
             args.project_inventory,
+            args.quality_file,
             args.output
         )
         return 0

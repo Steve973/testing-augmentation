@@ -110,7 +110,32 @@ def extract_all_operations(node: ast.AST) -> list[ast.Call]:
 # ============================================================================
 
 def decompose_if(stmt: ast.If, source_lines: list[str]) -> list[str]:
-    """If statement: 2 EIs (true/false)."""
+    """
+    If statement: EIs for all operations in condition, then 2 EIs for true/false.
+
+    For: if foo() and bar():
+    Returns:
+    - "executes → foo() succeeds"
+    - "foo() raises exception → exception propagates"
+    - "foo() returns true → continues to evaluate right side"
+    - "foo() returns false → combined condition is false"
+    - "executes → bar() succeeds"
+    - "bar() raises exception → exception propagates"
+    - "combined condition is true → enters if block"
+    - "combined condition is false → continues"
+    """
+    eis = []
+
+    # Extract all operations from the condition
+    operations = extract_all_operations(stmt.test)
+
+    # Generate EIs for each operation in the condition
+    for op in operations:
+        op_str = ast.unparse(op)
+        eis.append(f"executes → {op_str} succeeds")
+        eis.append(f"{op_str} raises exception → exception propagates")
+
+    # Now generate the condition true/false EIs
     condition = ast.unparse(stmt.test)
 
     # Check what's inside the if body for better descriptions
@@ -120,24 +145,27 @@ def decompose_if(stmt: ast.If, source_lines: list[str]) -> list[str]:
         # If it raises, be specific
         if isinstance(first_stmt, ast.Raise):
             exc = ast.unparse(first_stmt.exc) if first_stmt.exc else "exception"
-            return [
+            eis.extend([
                 f"{condition} is true → raises {exc}",
                 f"{condition} is false → continues"
-            ]
+            ])
+            return eis
 
         # If it returns, be specific
         if isinstance(first_stmt, ast.Return):
             ret_val = ast.unparse(first_stmt.value) if first_stmt.value else "None"
-            return [
+            eis.extend([
                 f"{condition} is true → returns {ret_val}",
                 f"{condition} is false → continues"
-            ]
+            ])
+            return eis
 
     # Generic if
-    return [
+    eis.extend([
         f"{condition} is true → enters if block",
         f"{condition} is false → continues"
-    ]
+    ])
+    return eis
 
 
 def decompose_for(stmt: ast.For, source_lines: list[str]) -> list[str]:

@@ -222,7 +222,12 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
 
                 # Match integration signature to correct EI on this line
                 target_ei = None
-                integration_sig = integration.get('signature', '').strip()
+                raw_sig = integration.get('signature', '').strip()
+                # Normalize quotes by round-tripping through AST
+                try:
+                    integration_sig = ast.unparse(ast.parse(raw_sig, mode='eval'))
+                except:
+                    integration_sig = raw_sig
 
                 # Find which EI matches this integration's signature
                 for ei_id in integration_eis:
@@ -775,17 +780,36 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         """Find all potential integration points (function/method calls)."""
         candidates: list[IntegrationCandidate] = []
 
+        # Build parent map: child -> parent
+        parent_map: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(node):
+            for child in ast.iter_child_nodes(parent):
+                parent_map[child] = parent
+
+        # Find all Call nodes
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 target = self._get_call_target(child)
                 if target and self._is_external_call(target):
-                    # Resolve target using imports and type annotations
                     resolved_target = self._resolve_target(target, param_types)
+
+                    # Walk up parent chain to find containing statement
+                    current = child
+                    containing_stmt = None
+                    while current in parent_map:
+                        parent = parent_map[current]
+                        if isinstance(parent, ast.stmt):
+                            containing_stmt = parent
+                            break
+                        current = parent
+
+                    # Use statement line if found, otherwise call line
+                    line = containing_stmt.lineno if containing_stmt else child.lineno
 
                     candidate = IntegrationCandidate(
                         type='call',
-                        target=resolved_target,  # <-- Use resolved target
-                        line=child.lineno,
+                        target=resolved_target,
+                        line=line,
                         signature=ast.unparse(child)
                     )
                     candidates.append(candidate)
@@ -942,24 +966,53 @@ def process_file(
             with open(ei_file, 'r', encoding='utf-8') as f:
                 ei_data = yaml.safe_load(f)
 
-            if ei_data and 'functions' in ei_data:
-                ei_by_name = {func['name']: func for func in ei_data['functions']}
+                if ei_data and 'functions' in ei_data:
+                    def merge_ei_recursive(entries_list: list[dict[str, Any]],
+                                           parent_ei_func: dict | None = None) -> None:
+                        """Recursively merge EI data into entries."""
+                        for entry in entries_list:
+                            current_ei_func = None
+                            if entry.get('needs_callable_analysis', False):
+                                # Match by line range (handles duplicate names like 'resolve')
+                                line_start = entry.get('line_start')
+                                line_end = entry.get('line_end')
 
-                def merge_ei_recursive(entries_list: list[dict[str, Any]]) -> None:
-                    """Recursively merge EI data into entries."""
-                    for entry in entries_list:
-                        if entry.get('needs_callable_analysis', False):
-                            func_name = entry['name']
-                            if func_name in ei_by_name:
-                                ei_func = ei_by_name[func_name]
-                                entry['branches'] = ei_func.get('branches', [])
-                                entry['total_eis'] = ei_func.get('total_eis', 0)
+                                # Find EI func that matches this line range
+                                ei_func = None
+                                for func in ei_data['functions']:
+                                    if func.get('line_start') == line_start and func.get('line_end') == line_end:
+                                        ei_func = func
+                                        break
 
-                        # Recurse into children
-                        if 'children' in entry and entry['children']:
-                            merge_ei_recursive(entry['children'])
+                                if ei_func:
+                                    print(f"DEBUG: Matched {entry.get('name')} at lines {line_start}-{line_end}",
+                                          file=sys.stderr)
+                                    entry['branches'] = ei_func.get('branches', [])
+                                    entry['total_eis'] = ei_func.get('total_eis', 0)
+                                    current_ei_func = ei_func
+                                elif parent_ei_func:
+                                    print(
+                                        f"DEBUG: Using parent for nested {entry.get('name')} at lines {line_start}-{line_end}",
+                                        file=sys.stderr)
+                                    # Nested function - extract branches from parent by line range
+                                    parent_branches = parent_ei_func.get('branches', [])
+                                    nested_branches = [
+                                        b for b in parent_branches
+                                        if line_start <= b['line'] <= line_end
+                                    ]
+                                    entry['branches'] = nested_branches
+                                    entry['total_eis'] = len(nested_branches)
+                                    current_ei_func = None
+                                else:
+                                    print(f"DEBUG: NO MATCH for {entry.get('name')} at lines {line_start}-{line_end}",
+                                          file=sys.stderr)
+                                    current_ei_func = None
 
-                merge_ei_recursive(entries)
+                            # Recurse into children
+                            if 'children' in entry and entry['children']:
+                                merge_ei_recursive(entry['children'], current_ei_func or parent_ei_func)
+
+                    merge_ei_recursive(entries)
 
     # Add execution paths to integration candidates
     add_execution_paths(entries)
