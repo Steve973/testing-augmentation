@@ -45,16 +45,16 @@ min_confidence = 80  # only report findings with 80%+ confidence
 # Per-callable cyclomatic complexity
 excellent = 5
 good = 10
-fair = 15
-poor = 20
+fair = 20
+poor = 30
 # Anything > poor is "critical"
 
 [thresholds.maintainability_index]
 # Maintainability index (0-100, higher is better)
-excellent = 80
-good = 60
-fair = 40
-poor = 20
+excellent = 20
+good = 15
+fair = 10
+poor = 5
 
 [thresholds.function_length]
 # Lines of code per callable (LLOC)

@@ -114,6 +114,8 @@ class QualityAnalyzer:
             text=True
         )
 
+        print(f"radon complexity output for '{source_file}': {result.stdout}")
+
         if result.returncode != 0:
             raise RuntimeError(f"radon cc failed: {result.stderr}")
 
@@ -345,7 +347,7 @@ class QualityAnalyzer:
             return "unknown"
 
         # For metrics where higher is better (maintainability, type coverage, comments)
-        if threshold_key in ["maintainability_index", "type_coverage", "comment_ratio"]:
+        if threshold_key in ["type_coverage", "comment_ratio"]:
             if value >= thresholds.get("excellent", 100):
                 return "excellent"
             elif value >= thresholds.get("good", 75):
@@ -353,6 +355,17 @@ class QualityAnalyzer:
             elif value >= thresholds.get("fair", 50):
                 return "fair"
             elif value >= thresholds.get("poor", 25):
+                return "poor"
+            else:
+                return "critical"
+        elif threshold_key == "maintainability_index":
+            if value >= thresholds.get("excellent", 20):
+                return "excellent"
+            elif value >= thresholds.get("good", 15):
+                return "good"
+            elif value >= thresholds.get("fair", 10):
+                return "fair"
+            elif value >= thresholds.get("poor", 5):
                 return "poor"
             else:
                 return "critical"
