@@ -358,6 +358,20 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         self.local_symbols.add(item.name)
 
+            elif isinstance(node, (ast.AnnAssign, ast.Assign, ast.AugAssign)):
+                if isinstance(node, ast.Assign):
+                    # For multiple targets like a = b = value, just use the first one
+                    if not node.targets:
+                        return
+                    first_target = node.targets[0]
+                    if not isinstance(first_target, ast.Name):
+                        return  # Skip non-Name targets (tuples, attributes, etc.)
+                    self.local_symbols.add(first_target.id)
+                else:  # AnnAssign or AugAssign
+                    if not isinstance(node.target, ast.Name):
+                        return
+                    self.local_symbols.add(node.target.id)
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Visit a class definition."""
         parent_id = self.context_stack[-1]

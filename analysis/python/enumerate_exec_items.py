@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import yaml
 
-from callable_id_generation import generate_function_id, generate_ei_id
+from callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id
 from models import Branch
 
 
@@ -814,6 +814,16 @@ class CallableFinder(ast.NodeVisitor):
         self.results: list[FunctionResult] = []
         self.fqn_stack = [module_fqn] if module_fqn else []
         self.func_counter = 1
+        self.assignment_counter = 1
+
+    def visit_Assign(self, node) -> None:
+        self._process_assignment(node)
+
+    def visit_AnnAssign(self, node) -> None:
+        self._process_assignment(node)
+
+    def visit_AugAssign(self, node) -> None:
+        self._process_assignment(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # Push class onto FQN stack
@@ -853,6 +863,69 @@ class CallableFinder(ast.NodeVisitor):
         self.results.append(result)
 
         self.func_counter += 1
+
+    def _process_assignment(self, node: ast.Assign | ast.AnnAssign | ast.AugAssign):
+        if not isinstance(node.value, ast.Call):
+            return
+
+        # Get target name(s) - Assign has targets (list), others have target (single)
+        if isinstance(node, ast.Assign):
+            # For multiple targets like a = b = value, just use the first one
+            if not node.targets:
+                return
+            first_target = node.targets[0]
+            if not isinstance(first_target, ast.Name):
+                return  # Skip non-Name targets (tuples, attributes, etc.)
+            target_name = first_target.id
+        else:  # AnnAssign or AugAssign
+            if not isinstance(node.target, ast.Name):
+                return
+            target_name = node.target.id
+
+        fqn = f"{self.module_fqn}.{target_name}"
+        callable_id = self.inventory.get(fqn)
+        if not callable_id:
+            callable_id = generate_assignment_id(self.unit_id, self.assignment_counter)
+            print(f"Warning: {fqn} not in inventory, generated {callable_id}")
+
+        self.assignment_counter += 1
+        branches: list[Branch] = []
+        ei_counter = 0
+
+        match node:
+            case ast.Assign():
+                outcomes = decompose_assignment(node, self.source_lines)
+            case ast.AnnAssign():
+                outcomes = decompose_annassign(node, self.source_lines)
+            case ast.AugAssign():
+                outcomes = decompose_augassign(node, self.source_lines)
+
+        if outcomes:
+            for outcome in outcomes:
+                ei_counter += 1
+                ei_id = generate_ei_id(callable_id, ei_counter)
+                if ' → ' in outcome:
+                    condition, result = outcome.split(' → ', 1)
+                else:
+                    condition = 'executes'
+                    result = outcome.replace('executes: ', '')
+                branches.append(
+                    Branch(
+                        id=ei_id,
+                        line=node.lineno,
+                        condition=condition,
+                        outcome=result
+                    )
+                )
+
+            function_result = FunctionResult(
+                name=target_name,
+                line_start=node.lineno,
+                line_end=node.end_lineno,
+                branches=branches
+            )
+
+            self.results.append(function_result)
 
 
 def enumerate_file(

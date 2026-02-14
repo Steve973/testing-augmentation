@@ -16,9 +16,9 @@ import argparse
 import ast
 import sys
 from pathlib import Path
-from typing import Dict
 
 from callable_id_generation import (
+    generate_assignment_id,
     generate_unit_id,
     generate_class_id,
     generate_method_id,
@@ -56,18 +56,46 @@ class CallableIDVisitor(ast.NodeVisitor):
     def __init__(self, unit_id: str, module_fqn: str):
         self.unit_id = unit_id
         self.module_fqn = module_fqn
-        self.mappings: Dict[str, str] = {}
+        self.mappings: dict[str, str] = {}
 
         # Counters
         self.function_counter = 0
         self.class_counter = 0
-        self.method_counters: Dict[str, int] = {}  # class_id -> counter
-        self.nested_function_counters: Dict[str, int] = {}  # parent_id -> counter
-        self.nested_class_counters: Dict[str, int] = {}  # parent_id -> counter
+        self.assignment_counter = 0  # For module-level assignments
+        self.method_counters: dict[str, int] = {}  # class_id -> counter
+        self.nested_function_counters: dict[str, int] = {}  # parent_id -> counter
+        self.nested_class_counters: dict[str, int] = {}  # parent_id -> counter
 
         # Context stack for tracking FQN and parent IDs
         self.fqn_stack = [module_fqn]
         self.id_stack = [unit_id]
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """Visit an assignment statement."""
+        # Only track module-level assignments (not inside functions/classes)
+        if self.id_stack[-1] == self.unit_id:
+            # Module-level assignment
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.assignment_counter += 1
+                    assignment_id = generate_assignment_id(self.unit_id, self.assignment_counter)
+                    fqn = f"{self.module_fqn}.{target.id}"
+                    self.mappings[fqn] = assignment_id
+
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Visit an annotated assignment statement."""
+        # Only track module-level assignments (not inside functions/classes)
+        if self.id_stack[-1] == self.unit_id:
+            # Module-level annotated assignment
+            if isinstance(node.target, ast.Name):
+                self.assignment_counter += 1
+                assignment_id = generate_assignment_id(self.unit_id, self.assignment_counter)
+                fqn = f"{self.module_fqn}.{node.target.id}"
+                self.mappings[fqn] = assignment_id
+
+        self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Visit a class definition."""
@@ -145,12 +173,12 @@ class CallableIDVisitor(ast.NodeVisitor):
         self.fqn_stack.pop()
 
 
-def process_file(filepath: Path, source_root: Path) -> Dict[str, str]:
+def process_file(filepath: Path, source_root: Path) -> dict[str, str]:
     """
     Process a single Python file and return FQN->ID mappings.
 
     Returns:
-        Dict mapping fully qualified names to callable IDs
+        dict mapping fully qualified names to callable IDs
     """
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -228,7 +256,7 @@ Output format:
     print(f"Processing {len(py_files)} Python files...")
 
     # Collect all mappings
-    all_mappings: Dict[str, str] = {}
+    all_mappings: dict[str, str] = {}
     for py_file in py_files:
         mappings = process_file(py_file, source_root)
         all_mappings.update(mappings)

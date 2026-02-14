@@ -18,12 +18,13 @@ import argparse
 import sys
 from pathlib import Path
 
-# Import stage modules (they'll be available when implemented)
-# from stage1_collect_integration_points import collect_integration_points
-# from stage2_classify_integration_points import classify_integration_points
-# from stage3_build_integration_graph import build_integration_graph
-# from stage4_enumerate_flows import enumerate_flows
-# from stage5_generate_windows import generate_windows
+from stages.stage1_collect_integration_points import collect_integration_points
+from stages.stage2_classify_integration_points import classify_integration_points
+from stages.stage3_build_integration_graph import build_integration_graph
+from stages.stage3B_find_high_branching_nodes import analyze_graph
+from stages.stage4_pattern_analysis import analyze_patterns
+from stages.stage5_enumerate_flows import enumerate_flows
+from stages.stage6_generate_windows import generate_windows
 
 
 def run_full_pipeline(ledger_paths: list[Path], output_dir: Path) -> None:

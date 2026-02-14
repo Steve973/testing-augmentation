@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 try:
     import tomli
@@ -31,7 +31,7 @@ class QualityMetric:
     name: str
     value: Any
     grade: str  # excellent, good, fair, poor, critical
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -39,11 +39,11 @@ class QualityReport:
     """Complete quality analysis report for a source file"""
     source_file: str
     overall_grade: str
-    metrics: List[QualityMetric] = field(default_factory=list)
-    flagged_callables: List[Dict[str, Any]] = field(default_factory=list)
-    raw_analyzer_output: Dict[str, Any] = field(default_factory=dict)
+    metrics: list[QualityMetric] = field(default_factory=list)
+    flagged_callables: list[dict[str, Any]] = field(default_factory=list)
+    raw_analyzer_output: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for YAML/JSON output"""
         result = {
             "sourceFile": self.source_file,
@@ -76,7 +76,7 @@ class QualityAnalyzer:
         self.thresholds = self.config.get("thresholds", {})
         self.enabled_analyzers = self.config["analyzers"]["enabled"]
 
-    def _load_config(self) -> Dict[str, Any]:
+    def _load_config(self) -> dict[str, Any]:
         """Load TOML configuration"""
         with open(self.config_path, "rb") as f:
             return tomli.load(f)
@@ -382,7 +382,7 @@ class QualityAnalyzer:
             else:
                 return "critical"
 
-    def _determine_overall_grade(self, metrics: List[QualityMetric]) -> str:
+    def _determine_overall_grade(self, metrics: list[QualityMetric]) -> str:
         """Determine overall grade as worst individual metric grade"""
         if not metrics:
             return "unknown"

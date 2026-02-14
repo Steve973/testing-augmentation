@@ -18,6 +18,11 @@ def generate_unit_id(fully_qualified_name: str) -> str:
     return f"U{hash_obj.hexdigest()[:10].upper()}"
 
 
+def generate_assignment_id(unit_id: str, assign_num: int) -> str:
+    """Generate an assignment ID."""
+    return f"{unit_id}_A{assign_num:03d}"
+
+
 def generate_class_id(unit_id: str, class_num: int) -> str:
     """
     Generate a class ID.
